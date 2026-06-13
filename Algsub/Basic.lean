@@ -25,15 +25,16 @@ end
 /- Types are classified w.r.t. their polarities. Neutral types (logical variables, constants)
 are regarded as type with both polarities -/
 inductive TyField (α : Type) : Type where
-  | nil : String → α → TyField α
+  | nil : TyField α
   | cons : String → α → TyField α → TyField α
-  deriving BEq, Hashable, DecidableEq, Repr
+  deriving BEq, Hashable, DecidableEq
+
 
 mutual
 inductive Ty : Type where
   | pos (p : PType)
   | neg (p : NType)
-  deriving BEq, Hashable, Repr
+  deriving BEq, Hashable
 inductive PType : Type where
   | bool : PType
   | int : PType
@@ -43,7 +44,7 @@ inductive PType : Type where
   | join : PType → PType → PType
   | fix : ℕ → PType → PType
   | bot : PType
-  deriving BEq, Hashable, Repr
+  deriving BEq, Hashable, Inhabited
 inductive NType : Type where
   | bool : NType
   | int : NType
@@ -53,14 +54,57 @@ inductive NType : Type where
   | meet : NType → NType → NType
   | top : NType
   | fix : ℕ → NType → NType
-  deriving BEq, Hashable, Repr
+  deriving BEq, Hashable, Inhabited
 end
+def TyField.Repr [Repr α] : TyField α → String
+  | .nil => ""
+  | .cons l τ .nil => l ++ " : " ++ (repr τ).pretty
+  | .cons l τ flds => l ++ ":" ++ (repr τ).pretty ++ flds.Repr
+
+mutual
+def PType.Repr : PType → String
+  | .bool => "bool"
+  | .fix n τ => "μ" ++ n.repr ++ "." ++ τ.Repr
+  | .arr τ₁ τ₂ => τ₁.Repr ++ "→" ++ τ₂.Repr
+  | .bot => "⊥"
+  | .join τ₁ τ₂ => τ₁.Repr ++ "⊔" ++ τ₂.Repr
+  | .var n => "v" ++ n.repr
+  | .int => "ℤ"
+  | .rcd fld => "{" ++ posrcd_repr fld ++ "}"
+
+def posrcd_repr : TyField PType → String
+  | .nil => ""
+  | .cons l τ .nil => l ++ ":" ++ τ.Repr
+  | .cons l τ flds => l ++ ":" ++ τ.Repr ++ posrcd_repr flds
+
+def NType.Repr : NType → String
+  | .bool => "bool"
+  | .int => "ℤ"
+  | .var n => "v" ++ n.repr
+  | .fix n τ => "μ " ++ n.repr ++ "." ++ τ.Repr
+  | .top => "⊤"
+  | .meet τ₁ τ₂ => τ₁.Repr ++ "⊓" ++ τ₂.Repr
+  | .arr τ₁ τ₂ => τ₁.Repr ++ "→" ++  τ₂.Repr
+  | .rcd fld => "{" ++ negrcd_repr fld ++ "}"
+
+def negrcd_repr : TyField NType → String
+  | .nil => ""
+  | .cons l τ .nil => l ++ ":" ++ τ.Repr
+  | .cons l τ flds => l ++ ":" ++ τ.Repr ++ negrcd_repr flds
+end
+def Ty.Repr : Ty → String
+  | .pos τ => τ.Repr
+  | .neg τ => τ.Repr
+
+instance : Repr PType := {reprPrec := fun t prec ↦ t.Repr}
+instance : Repr NType := {reprPrec := fun t prec ↦ t.Repr}
+instance : Repr Ty := {reprPrec := fun t _ ↦ t.Repr }
 
 abbrev MonoEnv := Std.TreeMap ℕ NType
 abbrev Typing := MonoEnv × PType
 abbrev Environment := Std.TreeMap ℕ Typing
 
-def join_env (e1 e2 : MonoEnv) : MonoEnv :=
+def meet_env (e1 e2 : MonoEnv) : MonoEnv :=
   e1.mergeWith (fun _ τ₁ τ₂ => NType.meet τ₁ τ₂) e2
 
 abbrev Constraint := PType × NType
@@ -78,24 +122,30 @@ deriving instance Hashable for Constraint
 
 def emptyEnv : Environment  := Std.TreeMap.empty
 
-
-def dom :  TyField α →  Std.HashSet String
-  | TyField.nil l _=> {l}
+def fields_of_list (l : List (String × α)) : TyField α :=
+  match l with
+    | [] => .nil
+    | (l , τ) :: fs => .cons l τ (fields_of_list fs)
+def dom :  TyField α →  List String
+  | TyField.nil=> {}
   | TyField.cons l _ ts => {l} ∪ dom ts
 
+def TyField.map_of_rcd : TyField α → Std.HashMap String α
+  | TyField.nil => Std.HashMap.emptyWithCapacity
+  | .cons l τ fls => fls.map_of_rcd.insert l τ
 def rcd_map (f : α → β) (rcd : TyField α) : TyField β :=
   match rcd with
-    | .nil l e => .nil l (f e)
+    | .nil  => .nil
     | .cons l x ts => .cons l (f x) (rcd_map f ts)
 
 def rcd_traverse {m : Type → Type} [Applicative m]
   {α β : Type} (f : α → m β) : TyField α → m (TyField β)
-  | .nil l e => (.nil l) <$> f e
+  | .nil => pure .nil
   | .cons l x fs => (TyField.cons l) <$> f x <*> (rcd_traverse f fs)
 
 def lookup (f : TyField α) (name : String) : Option α :=
   match f with
-    | .nil l e => if name = l then .some e else .none
+    | .nil => .none
     | .cons l x ts => if name = l then .some x else lookup ts name
 def Bisubst := Std.TreeMap ℕ (PType × NType)
 deriving instance Repr for Bisubst
@@ -134,10 +184,10 @@ def apply_neg (σ : Bisubst) : NType → NType
   | .fix n τ   => .fix n (apply_neg σ τ)
 
 def apply_pos_rcd (σ : Bisubst) : TyField PType → TyField PType
-  | .nil l τ => .nil l (apply_pos σ τ)
+  | .nil => .nil
   | .cons name t fs => .cons name (apply_pos σ t) (apply_pos_rcd σ fs)
 def apply_neg_rcd (σ : Bisubst) : TyField NType → TyField NType
-  | .nil l τ => .nil l (apply_neg σ τ)
+  | .nil => .nil
   | .cons name t fs => .cons name (apply_neg σ t) (apply_neg_rcd σ fs)
 end
 
@@ -149,7 +199,7 @@ def compose (σ₁ σ₂ : Bisubst) : Bisubst :=
   σ₂.map (fun _ (τ₁, τ₂) ↦ (apply_pos σ₁ τ₁, apply_neg σ₁ τ₂))
 
 -- test
-#eval compose (emptyBisubst.insert 0 (.bot, .var 0)) (emptyBisubst.insert 0 (.bot, .var 0))
+#eval compose (emptyBisubst.insert 0 (.var 1, .var 1)) (emptyBisubst.insert 0 (.bot, .var 0))
 
 mutual
 def ftv_pos (n : ℕ) : PType → Bool
@@ -158,20 +208,21 @@ def ftv_pos (n : ℕ) : PType → Bool
   | .join τ₁ τ₂ => ftv_pos n τ₁ && ftv_pos n τ₂
   | .rcd f => ftv_posrcd n f
   | .arr τ₁ τ₂ => ftv_neg n τ₁ && ftv_pos n τ₂
+  | .fix _ τ => ftv_pos n τ
 def ftv_neg (n : ℕ) : NType → Bool
  | .var m => m == n
  | .top | .int | .bool => false
  | .meet τ₁ τ₂ => ftv_neg n τ₁ && ftv_neg n τ₂
  | .rcd f => ftv_negrcd n f
  | .arr τ₁ τ₂ => ftv_pos n τ₁ && ftv_neg n τ₂
- | .fix m τ => _
+ | .fix _ τ => ftv_neg n τ
 
 def ftv_posrcd(n : ℕ) : TyField PType → Bool
-  | .nil _ τ => ftv_pos n τ
+  | .nil => False
   | .cons _ τ fs => ftv_pos n τ && ftv_posrcd n fs
 
 def ftv_negrcd (n : ℕ) : TyField NType → Bool
-  | .nil _ τ => ftv_neg n τ
+  | .nil => False
   | .cons _ τ fs => ftv_neg n τ && ftv_negrcd n fs
 end
 
