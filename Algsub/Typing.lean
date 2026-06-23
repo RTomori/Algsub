@@ -39,8 +39,9 @@ def atomic (c : Constraint) : Bool :=
 
 def bisubst_of_atomic (c : Constraint) : M Bisubst :=
   match c with
-    |(.var n, .var m) => if n < m then pure [n ↦ .meet (.var n) (.var m) ⁻]
-              else if m < n then pure [m ↦ .join (.var n) (.var m)⁺] else pure emptyBisubst
+    |(.var n, .var m) => pure [n ↦ .meet (.var n) (.var m) ⁻]
+      --if n < m then pure [n ↦ .meet (.var n) (.var m) ⁻]
+        --      else if m < n then pure [m ↦ .join (.var n) (.var m)⁺] else pure emptyBisubst
     |(.var n, τ) =>
       if (ftv_neg n τ) then do{
         let β ← mkFreshId;
@@ -72,7 +73,7 @@ def subi : Constraint →  M (List Constraint)
         |_, _ => Except.error (CannotBiunify (.pos tpos) (.neg tneg))
 
 def HashSet.map
-  [BEq α] [Hashable α][BEq β] [Hashable β] (s : Std.HashSet α)
+  [BEq α] [Hashable α] [BEq β] [Hashable β] (s : Std.HashSet α)
   (f : α → β) : Std.HashSet β :=   s.fold (fun acc x => acc.insert (f x)) ∅
 
 partial def biunify (C : List Constraint) : M Bisubst :=
@@ -84,12 +85,16 @@ partial def biunify (C : List Constraint) : M Bisubst :=
       then biunify C
       else if atomic c then
         let θ ← bisubst_of_atomic c;
-        modify (fun s ↦ {seen := HashSet.map (s.seen) (apply_to_cst θ) });
+        -- Record `c` as solved *before* rewriting by θ, then map the whole cache
+        -- through θ so it stays in the same coordinates as the rewritten worklist.
+        -- Without inserting `c`, a repeated atomic constraint α ≤ τ is solved again
+        -- and conjoins τ to α's bound a second time, producing duplicate ⊓/⊔ terms.
+        modify (fun s ↦ {s with seen := HashSet.map (s.seen.insert c) (apply_to_cst θ) });
         let σ ← biunify (C.map (apply_to_cst θ));
         pure (compose σ θ)
      else
       let cst ←subi c;
-      modify (fun s ↦ {seen := s.seen.insert c});
+      modify (fun s ↦ {s with seen := s.seen.insert c});
       biunify (cst ++ C);
     }
 
@@ -106,12 +111,14 @@ def inferExpr : Exp → M Typing
             pure (Std.TreeMap.empty.insert n (.var s), PType.var s)
         }
       }
-      | .lam _ e => do{
+      | .lam e => do{
         let (Δ, τ') ← inferExpr e;
         let n := Δ.size - 1;
         match Δ.get? n with
           | .none =>
-              Except.error Impossible
+              -- Corresponds to absvac in polyrec
+              let s ← mkFreshId;
+              pure (Δ, .arr (.var s) τ')
           | .some τ =>
               pure (Δ.erase n, .arr τ τ')
       }
@@ -121,16 +128,16 @@ def inferExpr : Exp → M Typing
         let α ← mkFreshId;
         let ξ ← biunify [(τ₁, .arr τ₂ (.var α))];
         let Δ := meet_env Δ₁  Δ₂;
-        pure (Δ.map (fun i τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
+        pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
       }
       | .ifc e1 e2 e3 => do{
         let (Δ₁, τ₁) ← inferExpr e1;
         let (Δ₂, τ₂) ← inferExpr e2;
         let (Δ₃, τ₃) ← inferExpr e3;
-        let β ← mkFreshId;
-        let ξ ← biunify [(τ₁, .bool), (τ₂, .var β), (τ₃,.var β)];
+        let α ← mkFreshId;
+        let ξ ← biunify [(τ₁, .bool),(τ₂,.var α),  (τ₃, .var α)];
         let Δ := meet_env Δ₃ (meet_env Δ₂ Δ₁);
-        pure (Δ.map (fun i τ ↦ apply_neg ξ τ), apply_pos ξ (.var β))
+        pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
       }
       | .letE e1 e2 => do{
         let ty@(Δ₁, _)← inferExpr e1;
@@ -143,10 +150,15 @@ def inferExpr : Exp → M Typing
         let (Δ,τ) ← inferExpr e;
         let α ← mkFreshId;
         let ξ ← biunify [(τ, .rcd (.cons l (.var α) .nil))];
-        pure (Δ.map (fun i τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
+        pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
       }
       | .rcd f => inferRcd f
-      | _ => Except.error Impossible
+      | .fix e=> do{
+        let (Δ, τ) ← inferExpr e;
+        let n := numBinders e;
+        pure (Δ.erase n, τ)
+      }
+
 def inferRcd : Fields → M Typing
   | .nil l e  => do{
     let (Δ, τ) ← inferExpr e;
@@ -162,9 +174,26 @@ def inferRcd : Fields → M Typing
       | _ => Except.error Impossible
   }
 end
-#eval (biunify [(.var 0, .arr (.var 0) (.var 0))]).run
-#eval (inferExpr ( .lam "x" (.ifc (.proj (.bvar 0) "p") (.proj (.bvar 0) "q") (.proj (.bvar 0) "q") ))).run
-/- -/
-#eval (inferExpr ((.proj (.bvar 1) "p"))).run
 
+/-- Run inference, normalize (Layer 1) and simplify (Layer 2) the type scheme. -/
+def infer (e : Exp) : M Typing := do
+  let t ← inferExpr e
+  pure (simplify t)
+
+#eval (normBisubst <$> biunify [(.var 0, .arr (.var 0) (.var 0))]).run
+#eval
+  (infer ( .lam  (.ifc (.proj (.bvar 0) "p") (.proj (.bvar 0) "q") (.proj (.bvar 0) "q") ))).run
+/- -/
+#eval (infer ((.proj (.bvar 1) "p"))).run
+#eval (infer (.lam (.app (.bvar 0) (.bvar 0)))).run
+#eval (infer (.app (.lam (.app (.bvar 0) (.bvar 0))) (.lam (.bvar 0)))).run
+#eval (infer
+    (.lam (.app (.lam (.app (.bvar 1) (.app (.bvar 0) (.bvar 0)))) (.lam (.app (.bvar 1) (.app (.bvar 0) (.bvar 0))))))
+    ).run
+#eval (infer (.app (.lam (.app (.bvar 0) (.bvar 0))) (.lam (.app (.bvar 0) (.bvar 0))))).run
+#eval (infer (.fix (.lam (.bvar 1)))).run
+#eval (infer (.lam (.lam (.app (.bvar 1) (.app (.bvar 1) (.bvar 0)))))).run
+#eval  (infer (.lam (.bvar 0))).run
+#eval (infer (.app (.lam (.app (.lam (.app (.bvar 1) (.app (.bvar 0) (.bvar 0)))) (.lam (.app (.bvar 1) (.app (.bvar 0) (.bvar 0)))))) (.lam (.lam (.bvar 1))))).run
+#eval (infer (.app (.lam (.app (.bvar 0) (.lam (.bvar 0)))) (.lam (.app (.bvar 0) (.bvar 0))))).run
 end TypeChecker
