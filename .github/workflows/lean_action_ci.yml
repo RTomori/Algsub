@@ -12,6 +12,10 @@ permissions:
   id-token: write # Write access to ID tokens
 
 jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: githhub-pages
   build:
     runs-on: ubuntu-latest
 
