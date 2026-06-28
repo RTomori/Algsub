@@ -453,3 +453,45 @@ def simpFix : ℕ → Typing → Typing
     if typingEq ty ty' then ty else simpFix fuel ty'
 
 def simplify (ty : Typing) : Typing := simpFix 100 (normTyping ty)
+
+-- Module for type automata, partly ported from Dolan's.
+namespace Types
+
+inductive Polarity
+  | pos | neg
+  deriving DecidableEq, Repr, Hashable, Ord
+
+def Polarity.flip : Polarity → Polarity
+  | .pos => .neg
+  | .neg => .pos
+
+abbrev SMap (α : Type) := Std.TreeMap String α
+
+inductive TyArg (α : Type)
+  | apos (a : α) | aneg (a : α) | aneutral (a : α)
+
+inductive Components (α : Type)
+  | func (reqs : SMap Unit) (res : α)
+  | rcd (tagged : SMap (SMap α)) (untagged : Option (SMap α))
+  | base (s : ℕ) (args : List (TyArg α))
+
+inductive TypeLat (α : Type)
+  | unit
+  | unexpanded (t : Components α)
+  | expanded (ts : List (Components α))
+abbrev StateId := ℕ
+abbrev StateSet := Std.TreeSet StateId
+
+structure State where
+  id : StateId
+  pol : Polarity
+  cons : TypeLat StateSet
+  flow : StateSet
+-- NFA
+structure Graph where
+  nextId : StateId
+  nodes : Std.HashMap StateId State
+
+abbrev AutoM := StateM Graph
+
+end Types

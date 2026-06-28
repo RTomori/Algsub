@@ -12,14 +12,9 @@ permissions:
   id-token: write # Write access to ID tokens
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment:
-      name: githhub-pages
   build:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
       - uses: leanprover/lean-action@v1
-      - uses: leanprover-community/docgen-action@v1
