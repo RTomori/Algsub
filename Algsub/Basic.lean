@@ -6,18 +6,20 @@ mutual
   inductive Exp : Type where
   /-- Fixme : translate to locally nameless -/
     | bvar : ℕ → Exp
+    | fvar : String → Exp
     | app : Exp → Exp → Exp
     | lbool : Bool → Exp
     | lint : Int → Exp
-    | lam :  Exp → Exp
+    | lam : String → Exp → Exp
     | fix : Exp → Exp
     | rcd : Fields → Exp
     | ifc : Exp → Exp → Exp → Exp
-    | letE : Exp → Exp → Exp
+    | letE : String → Exp → Exp → Exp
+    | seq : Exp → Exp → Exp
     | proj : Exp → String → Exp
     deriving BEq, Repr
   inductive Fields : Type where
-    | nil : String → Exp → Fields
+    | nil : Fields
     | cons : String → Exp → Fields → Fields
     deriving BEq, Repr
 end
@@ -100,9 +102,9 @@ instance : Repr PType := {reprPrec := fun t prec ↦ t.Repr}
 instance : Repr NType := {reprPrec := fun t prec ↦ t.Repr}
 instance : Repr Ty := {reprPrec := fun t _ ↦ t.Repr }
 
-abbrev MonoEnv := Std.TreeMap ℕ NType
+abbrev MonoEnv := Std.HashMap String NType
 abbrev Typing := MonoEnv × PType
-abbrev Environment := Std.TreeMap ℕ Typing
+abbrev Environment := Std.HashMap String Typing
 
 abbrev Constraint := PType × NType
 
@@ -114,15 +116,16 @@ inductive Exception where
   | Impossible
   deriving Repr
 
-deriving instance Hashable for Constraint
+deriving instance Hashable,BEq for Constraint
 
 
-def emptyEnv : Environment  := Std.TreeMap.empty
+def emptyEnv : Environment  := Std.HashMap.emptyWithCapacity
 
 def fields_of_list (l : List (String × α)) : TyField α :=
   match l with
     | [] => .nil
     | (l , τ) :: fs => .cons l τ (fields_of_list fs)
+
 def TyField.toList : TyField α → List (String × α)
   | .nil => []
   | .cons l x fs => (l, x) :: fs.toList
@@ -206,49 +209,116 @@ def compose (σ₁ σ₂ : Bisubst) : Bisubst :=
 #eval compose (emptyBisubst.insert 0 (.var 1, .var 1)) (emptyBisubst.insert 0 (.bot, .var 0))
 
 mutual
-def ftv_pos (n : ℕ) : PType → Bool
+def isftv_pos (n : ℕ) : PType → Bool
   | .var m => m == n
   | .bot | .int | .bool  => false
-  | .join τ₁ τ₂ => ftv_pos n τ₁ || ftv_pos n τ₂
-  | .rcd f => ftv_posrcd n f
-  | .arr τ₁ τ₂ => ftv_neg n τ₁ || ftv_pos n τ₂
-  | .fix _ τ => ftv_pos n τ
-def ftv_neg (n : ℕ) : NType → Bool
+  | .join τ₁ τ₂ => isftv_pos n τ₁ || isftv_pos n τ₂
+  | .rcd f => isftv_posrcd n f
+  | .arr τ₁ τ₂ => isftv_neg n τ₁ || isftv_pos n τ₂
+  | .fix _ τ => isftv_pos n τ
+def isftv_neg (n : ℕ) : NType → Bool
  | .var m => m == n
  | .top | .int | .bool => false
- | .meet τ₁ τ₂ => ftv_neg n τ₁ || ftv_neg n τ₂
- | .rcd f => ftv_negrcd n f
- | .arr τ₁ τ₂ => ftv_pos n τ₁ || ftv_neg n τ₂
- | .fix _ τ => ftv_neg n τ
+ | .meet τ₁ τ₂ => isftv_neg n τ₁ || isftv_neg n τ₂
+ | .rcd f => isftv_negrcd n f
+ | .arr τ₁ τ₂ => isftv_pos n τ₁ || isftv_neg n τ₂
+ | .fix _ τ => isftv_neg n τ
 
-def ftv_posrcd(n : ℕ) : TyField PType → Bool
+def isftv_posrcd(n : ℕ) : TyField PType → Bool
   | .nil => false
-  | .cons _ τ fs => ftv_pos n τ || ftv_posrcd n fs
+  | .cons _ τ fs => isftv_pos n τ || isftv_posrcd n fs
 
-def ftv_negrcd (n : ℕ) : TyField NType → Bool
+def isftv_negrcd (n : ℕ) : TyField NType → Bool
   | .nil => false
-  | .cons _ τ fs => ftv_neg n τ || ftv_negrcd n fs
+  | .cons _ τ fs => isftv_neg n τ || isftv_negrcd n fs
 end
 
 mutual
 def numBinders : Exp → ℕ
-  | .bvar _|.lbool _ | .lint _ => 0
-  | .lam e => numBinders e + 1
-  | .letE e1 e2 => max (numBinders e2 + 1) (numBinders e1)
+  | .bvar _|.lbool _ | .lint _ | .fvar _ => 0
+  | .lam _ e => numBinders e + 1
+  | .letE _ e1 e2 => max (numBinders e2 + 1) (numBinders e1)
   | .ifc e1 e2 e3 => max (max (numBinders e1) (numBinders e2)) (numBinders e3)
   | .fix e => numBinders e + 1
   | .app e1 e2 => max (numBinders e1) (numBinders e2)
+  | .seq e1 e2 => max (numBinders e1) (numBinders e2)
   | .proj e _ => numBinders e
   | .rcd f => numBinders_rcd f
 
 def numBinders_rcd : Fields → ℕ
-  | .nil _ e => numBinders e
+  | .nil => 0
   | .cons _ e fs => max (numBinders e) (numBinders_rcd fs)
 end
 instance : Traversable TyField where
   map := rcd_map
   traverse := rcd_traverse
 
+mutual
+def ftvs_pos : PType → Set ℕ
+  | .var m => {m}
+  | .bot | .int | .bool => {}
+  | .join τ₁ τ₂ => ftvs_pos τ₁ ∪ ftvs_pos τ₂
+  | .rcd f => ftvs_posrcd f
+  | .arr τ₁ τ₂ => ftvs_neg τ₁ ∪ ftvs_pos τ₂
+  | .fix n τ => ftvs_pos τ \ {n}
+def ftvs_neg : NType → Set ℕ
+  | .var m => {m}
+  | .top | .int | .bool => {}
+  | .meet τ₁ τ₂ => ftvs_neg τ₁ ∪ ftvs_neg τ₂
+  | .rcd f => ftvs_negrcd f
+  | .arr τ₁ τ₂ => ftvs_pos τ₁ ∪ ftvs_neg τ₂
+  | .fix n τ => ftvs_neg τ \ {n}
+def ftvs_posrcd : TyField PType → Set ℕ
+  | .nil => {}
+  | .cons _ τ fs => ftvs_pos τ ∪ ftvs_posrcd fs
+def ftvs_negrcd : TyField NType → Set ℕ
+  | .nil => {}
+  | .cons _ τ fs => ftvs_neg τ ∪ ftvs_negrcd fs
+end
+
+
+mutual
+@[simp]
+def Exp.size : Exp → ℕ
+  | .bvar _ | .fvar _ | .lbool _ | .lint _ => 1
+  | .app e1 e2 | .seq e1 e2      => 1 + e1.size + e2.size
+  | .lam _ e        => 1 + e.size
+  | .fix e          => 1 + e.size
+  | .ifc e1 e2 e3   => 1 + e1.size + e2.size + e3.size
+  | .letE _ e1 e2   => 1 + e1.size + e2.size
+  | .proj e _       => 1 + e.size
+  | .rcd f          => 1 + f.size
+@[simp]
+def Fields.size : Fields → ℕ
+  | .nil          => 1
+  | .cons _ e fs  => 1 + e.size + fs.size
+end
+
+mutual
+def free_in_pos : PType → Set ℕ
+  | .bool | .int | .bot => {}
+  | .var n => {n}
+  | .arr t1 t2 => free_in_neg t1 ∪ free_in_pos t2
+  | .join t1 t2 => free_in_pos t1 ∪ free_in_pos t2
+  | .rcd fs => free_in_posrcd fs
+  | .fix n t => free_in_pos t \ {n}
+def free_in_neg : NType → Set ℕ
+  | .bool | .int | .top => {}
+  | .var n => {n}
+  | .arr t1 t2 =>free_in_pos t1 ∪ free_in_neg t2
+  | .rcd fs => free_in_negrcd fs
+  | .meet t1 t2 => free_in_neg t1 ∪ free_in_neg t2
+  | .fix n t => free_in_neg t \ {n}
+
+def free_in_posrcd : TyField PType → Set ℕ
+  | .nil => {}
+  | .cons _ t fs => free_in_pos t ∪ free_in_posrcd fs
+def free_in_negrcd : TyField NType → Set ℕ
+  | .nil => {}
+  | .cons _ t fs => free_in_neg t ∪ free_in_negrcd fs
+end
+
+def free_in_typing (t : Typing) := t.fst
 /- ===== Lattice normalization (Layer 1) =====
 Smart constructors that keep ⊔/⊓ in a canonical form by applying the lattice laws:
   * idempotence/dedup (τ ⊔ τ = τ),
@@ -417,13 +487,13 @@ def dropSinglePolar (ty : Typing) : Typing :=
 mutual
 /-- Drop vacuous recursive binders: `μβ.τ` with `β ∉ τ` ⇒ `τ`. -/
 partial def dropMuP : PType → PType
-  | .fix n t => let t := dropMuP t; if ftv_pos n t then .fix n t else t
+  | .fix n t => let t := dropMuP t; if isftv_pos n t then .fix n t else t
   | .join a b => .join (dropMuP a) (dropMuP b)
   | .arr d c => .arr (dropMuN d) (dropMuP c)
   | .rcd f => .rcd (dropMuPRcd f)
   | t => t
 partial def dropMuN : NType → NType
-  | .fix n t => let t := dropMuN t; if ftv_neg n t then .fix n t else t
+  | .fix n t => let t := dropMuN t; if isftv_neg n t then .fix n t else t
   | .meet a b => .meet (dropMuN a) (dropMuN b)
   | .arr d c => .arr (dropMuP d) (dropMuN c)
   | .rcd f => .rcd (dropMuNRcd f)
@@ -454,44 +524,70 @@ def simpFix : ℕ → Typing → Typing
 
 def simplify (ty : Typing) : Typing := simpFix 100 (normTyping ty)
 
--- Module for type automata, partly ported from Dolan's.
-namespace Types
+mutual
+@[simp]
+def open_expr_at (k : ℕ) (x : String) : Exp → Exp
+  | .bvar i => if i == k then (.fvar x) else (.bvar i)
+  | .fvar y => .fvar y
+  | .lbool b => .lbool b
+  | .lint n => .lint n
+  | .app t₁ t₂ => .app (open_expr_at k x t₁) (open_expr_at k x t₂)
+  | .seq t₁ t₂ => .seq (open_expr_at k x t₁) (open_expr_at (k + 1) x t₂)
+  | .lam y t => .lam y (open_expr_at (k + 1) x t)
+  | .ifc t₁ t₂ t₃ => .ifc (open_expr_at k x t₁) (open_expr_at k x t₂) (open_expr_at k x t₃)
+  | .fix t => .fix (open_expr_at (k + 1) x t)
+  | .proj f y => .proj (open_expr_at k x f) y
+  | .letE y t₁ t₂ => .letE y (open_expr_at k x t₁) (open_expr_at (k + 1) x t₂)
+  | .rcd f => .rcd (open_rcd_at k x f)
+  @[simp]
+def open_rcd_at (k : ℕ) (x : String) : Fields → Fields
+  | .nil => .nil
+  | .cons l e fs => .cons l (open_expr_at k x e) (open_rcd_at k x fs)
+end
+@[elab_as_elim]
+theorem Exp.induct
+  {motive : Exp → Prop}
+  (base_bool : ∀ b, motive (.lbool b))
+  (base_int : ∀ n, motive (.lint n))
+  (base_bvar : ∀ n, motive (.bvar n))
+  (base_fvar : ∀ s, motive (.fvar s))
+  (base_nil : motive (.rcd .nil))
+  (ind_lam : ∀ x e, motive e → motive (.lam x e))
+  (ind_app : ∀ e1 e2, motive e1 → motive e2 → motive (.app e1 e2))
+  (ind_seq : ∀ e1 e2, motive e1 → motive e2 → motive (.seq e1 e2))
+  (ind_fix : ∀ e, motive e → motive (.fix e))
+  (ind_if : ∀ e1 e2 e3, motive e1 → motive e2 → motive e3 → motive (.ifc e1 e2 e3))
+  (ind_let : ∀ x e1 e2, motive e1 → motive e2 → motive (.letE x e1 e2))
+  (ind_cons : ∀ x e fs, motive e → motive (.rcd fs) → motive (.rcd (.cons x e fs)))
+  (ind_proj : ∀ e x, motive e → motive (.proj e x))
+  (e : Exp) : motive e :=
+  Exp.rec (motive_1 := motive) (motive_2 := fun fs => motive (.rcd fs))
+    base_bvar base_fvar ind_app base_bool base_int ind_lam ind_fix
+    (fun _f ih => ih)
+    ind_if ind_let ind_seq ind_proj
+    base_nil ind_cons
+    e
 
-inductive Polarity
-  | pos | neg
-  deriving DecidableEq, Repr, Hashable, Ord
+theorem opening_preserves_size : ∀ k x e, (open_expr_at k x e).size = e.size := by
+  intros k x e
+  induction e using Exp.induct generalizing k with
+    | base_bool b | base_int n | base_fvar x | base_nil => simp
+    | base_bvar m =>
+        by_cases h : m == k <;> simp[h]
+    | ind_lam y e h => simp; rw[h]
+    | ind_app e1 e2 h1 h2 =>
+        simp
+        rw[h1 k, h2 k]
+    | ind_seq e1 e2 h1 h2 =>
+      simp
+      rw[h1 k, h2 (k + 1)]
+    | ind_fix e h => simp; rw[h]
+    | ind_if e1 e2 e3 h1 h2 h3 => simp; rw[h1, h2, h3]
+    | ind_let y e1 e2 h1 h2 => simp; rw[h2 (k + 1), h1]
+    | ind_cons y e fs he hfs => simp at hfs; simp; rw[he, hfs]
+    | ind_proj e y h => simp; rw[h]
 
-def Polarity.flip : Polarity → Polarity
-  | .pos => .neg
-  | .neg => .pos
+def open_expr x e := open_expr_at 0 x e
 
-abbrev SMap (α : Type) := Std.TreeMap String α
-
-inductive TyArg (α : Type)
-  | apos (a : α) | aneg (a : α) | aneutral (a : α)
-
-inductive Components (α : Type)
-  | func (reqs : SMap Unit) (res : α)
-  | rcd (tagged : SMap (SMap α)) (untagged : Option (SMap α))
-  | base (s : ℕ) (args : List (TyArg α))
-
-inductive TypeLat (α : Type)
-  | unit
-  | unexpanded (t : Components α)
-  | expanded (ts : List (Components α))
-abbrev StateId := ℕ
-abbrev StateSet := Std.TreeSet StateId
-
-structure State where
-  id : StateId
-  pol : Polarity
-  cons : TypeLat StateSet
-  flow : StateSet
--- NFA
-structure Graph where
-  nextId : StateId
-  nodes : Std.HashMap StateId State
-
-abbrev AutoM := StateM Graph
-
-end Types
+theorem opening_preserves_size' : ∀ x e, (open_expr x e).size = e.size := by
+  apply opening_preserves_size
