@@ -70,16 +70,14 @@
 ]
 
   #proof[
- はじめの主張を示す．$rho models alpha <= t^-$を固定する．$t^+, t^-$に関する induction で示す． 
- - case $t^+ = mono(b o o l)$．$t^-$の induction で示す．
-    - case $t^- = mono(b o o l), top$．恒等的な代入を取れば従う．
-    - case $t^- = gamma eq.not alpha$．$rho' = rho$とすれば従う．
-    - case $t^- = alpha$．$rho(alpha) <= rho'(xi alpha^-)$なる$rho'$が取れることを示す．unroll の列に関する induction を回せばよい．
-        - $n = 1$．$xi(alpha^-)  = alpha inter.sq t^-$．$rho(alpha) <= alpha inter.sq t^-$
-    - (IH)任意の$t^+$に出現する負の型$tau^-$に対し，
+最初の主張を示そう．条件を満たす canonical な代入として，恒等的な代入が取れることを示せばよい．
+
+$rho models alpha <= t^-$を任意に取る．$rho'= rho$とできることを$t^-, t^+$に関する mutual induction で示す．以下，atomic type は$o_1, o_2,...$と書くことにする．
++ case $(t^-, t^+) = (gamma, tau)$ ただし$gamma eq.not alpha$で，$tau$は任意の型変数または atomic type または$bot$．このとき，$gamma = xi gamma$，$xi tau = tau$より成り立つ．
++ case $(t^-, t^+) = (alpha, tau)$．ただし$tau$は任意の型変数または atomic type または$bot$．このとき，先程と同様に$xi tau = tau$．なので$rho tau <= rho (xi tau)$は成立．$rho(xi alpha) <= rho alpha$を unroll の回数に関する induction で示す．再帰型の unrolling の列は$t_0 = alpha, t_(n + 1) = t_n inter.sq [t_n slash alpha^-]t^-$と書け，再帰型はこの$omega$鎖の下限なので，これを示せば十分である．
+ - $n = 0$．$rho(alpha) <= rho(t_0) = rho(alpha)$なので明らか．
+ - (IH)各$n$について，$rho(alpha) <= rho(t_n)$を仮定． 
++ Inductive step.
 ]
-==
-#lemma()[
-   $alpha <= t^-$を atomic な制約とする．このとき，bisubstitution 
-    
-] 
+== 線型論理を通した biunification の理解
+一旦 polar type を忘れることにして，subtyping の entailment がどのような論理体系に対応するかを考えてみよう．

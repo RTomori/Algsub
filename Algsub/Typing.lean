@@ -10,30 +10,33 @@ structure TypeChecker.State where
   ngen : ℕ  := 0
   nvargen : ℕ := 0
   seen : Std.HashSet Constraint := {}
+  lparams : Environment := {}
 
 structure TypeChecker.Context where
   env : Environment := {}
-  lparams : List String := []
+  lctx : Environment := {}
 
 namespace TypeChecker
 
 abbrev M := ReaderT Context <| StateT TypeChecker.State <| Except Exception
 
-def M.run (env : Environment := {}) (x : M α) : Except Exception α := x {env}|>.run' {}
+def M.run (lctx : Environment := {}) (x : M α) : Except Exception α := x {lctx}|>.run' {}
 
-def getEnv : M Environment := return (← read).env
+def getPolyCtx : M Environment := return (← read).lctx
 
-def extendEnv (x : String) (t : Typing) : M α → M α := ReaderT.adapt (fun c ↦ {env := c.env.insert x t})
+def getParams : M Environment := return (← get).lparams
+
+def extendPolyCtx (x : String) (t : Typing) : M α → M α := ReaderT.adapt (fun c ↦ {lctx := c.lctx.insert x t})
 
 def mkFreshId : M ℕ := do{
   let s ← get;
-  modify (fun s ↦ {ngen := s.ngen + 1});
+  modify (fun s ↦ {s with ngen := s.ngen + 1});
   pure s.ngen
 }
 
 def mkFreshVar : M String := do{
   let s ← get;
-  modify (fun s ↦ {nvargen := s.nvargen + 1});
+  modify (fun s ↦ {s with nvargen := s.nvargen + 1});
   pure (("_uniq." ++ s.nvargen.repr))
 }
 
@@ -49,6 +52,9 @@ def atomic (c : Constraint) : Bool :=
                             | .int, .var _|.var _, .int => true
                             | _, _ => false
 
+
+/-- Perhaps sound? since ξ(.var n) = .var n is by no means a subtype of τ, where τ constructed.
+-/
 def bisubst_of_atomic (c : Constraint) : M Bisubst :=
   match c with
     |(.var n, .var m) => pure [n ↦ .meet (.var n) (.var m) ⁻]
@@ -56,11 +62,11 @@ def bisubst_of_atomic (c : Constraint) : M Bisubst :=
         --      else if m < n then pure [m ↦ .join (.var n) (.var m)⁺] else pure emptyBisubst
     |(.var n, τ) =>
       if not (isftv_neg n τ) then pure [n ↦ .meet (.var n) τ ⁻]
-      else Except.error Impossible
+      else Except.error <| CannotBiunify (.pos (.var n)) (.neg τ)
     |(τ, .var n) => if not (isftv_pos n τ) then
       pure [n ↦ .join (.var n) τ ⁺]
-      else Except.error Impossible
-    |(_, _) => Except.error Impossible
+      else Except.error <| CannotBiunify (.pos τ) (.neg (.var n))
+    |(τ₁, τ₂) => Except.error <| CannotBiunify (.pos τ₁) (.neg τ₂)
 
 def subi : Constraint →  M (List Constraint)
   | (tpos, tneg) =>
@@ -85,6 +91,13 @@ def HashSet.map
   [BEq α] [Hashable α] [BEq β] [Hashable β] (s : Std.HashSet α)
   (f : α → β) : Std.HashSet β :=   s.fold (fun acc x => acc.insert (f x)) ∅
 
+/--
+#### Proof that Bisubsitution Cannot Solve the Atomic Constraint
+
+∀ρ' ∀ t⁻,t⁺, ∃ ρ ⊧ α ≤ τ, ρ t⁺ ≤ ρ'(ξt⁺), ρ'(ξt⁻)≤ρt⁻.
+A counterexample:
+
+-/
 partial def biunify (C : List Constraint) : M Bisubst :=
   match C with
     | [] => pure emptyBisubst
@@ -109,11 +122,44 @@ partial def biunify (C : List Constraint) : M Bisubst :=
 
 
 mutual
-  def inferExpr : Exp → M Typing
+ /--
+ # How to type recursive terms?
+ * 次の主張は成り立つだろうか?
+ fix f = e : [Δ]τならば，Δ', τ₁，τ₂が存在してe : [f : τ₁, Δ']τ₂かつτ₁ ≤ τ₂。
+
+
+ | .fix f e => do{
+      let s ← mkFreshVar;
+      let e' := open_expr s e;
+      -- Let [Δ₀]α be typing where dom(Δ₀) = fv(e) \  fv(Π), each assigned to distinct type variables
+      let Δ ← getPolyCtx;
+      let dom := (fv (.fix f e)).sort \ Δ.keys;
+      let α ← mkFreshId;
+      let env : MonoEnv ← dom.foldlM (fun Δ x ↦ do{
+        let m ← mkFreshId;
+        pure (Δ.insert x (.var m))
+      }) {};
+      let ty@(Δ₀, τ₀) ← extendPolyCtx s (env, .var α) (inferExpr e');
+      let ξ ← biunify [(τ₀, .var α)];
+      pure ((meet_env env Δ₀).map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
+      } -/
+  def inferExpr : (e : Exp) → M Typing
     | Exp.lbool _ => pure ({}, .bool)
     | Exp.lint _ => pure ({}, .int)
+    | Exp.succ e | Exp.pred e => do{
+      let (Δ, τ) ← inferExpr e;
+      let α ← mkFreshId;
+      let ξ ← biunify [(τ, .int)];
+      pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), .int)
+    }
+    | Exp.iszero e => do{
+      let (Δ, τ) ← inferExpr e;
+      let α ← mkFreshId;
+      let ξ ← biunify [(τ, .int)];
+      pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), .bool)
+    }
     | .fvar x => do{
-      let env ← getEnv;
+      let env ← getPolyCtx;
       match env.get? x with
         | .some (Δ, τ) => do
             let (pos, neg) := schemeOccs (Δ, τ);
@@ -123,9 +169,13 @@ mutual
               let m ← mkFreshId;
               pure (ξ.insert n (.var m, .var m))) emptyBisubst;
             pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ τ)
-        | .none => do
+        | .none =>
+          do
             let s ← mkFreshId;
-            pure (Std.HashMap.emptyWithCapacity.insert x (.var s), .var s)
+            let ty := (Std.HashMap.emptyWithCapacity.insert x (.var s), .var s);
+            --modify (fun s => {lparams := params.insert x ty});
+            pure ty
+
     }
     | .lam _ e => do
       let s ← mkFreshVar;
@@ -145,18 +195,28 @@ mutual
       let Δ := meet_env Δ₁  Δ₂;
       pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
     }
+    | .add e₁ e₂ | .mul e₁ e₂ => do{
+      let (Δ₁, τ₁) ← inferExpr e₁;
+      let (Δ₂, τ₂) ← inferExpr e₂;
+      let α ← mkFreshId;
+      let ξ ← biunify [(.arr .int (.arr .int .int), .arr τ₁ (.arr τ₂ (.var α)))];
+      let Δ := meet_env Δ₁ Δ₂;
+      pure (Δ.map (fun _ τ ↦ apply_neg ξ τ),  apply_pos ξ (.var α))
+    }
     | .ifc e1 e2 e3 => do{
         let (Δ₁, τ₁) ← inferExpr e1;
         let (Δ₂, τ₂) ← inferExpr e2;
         let (Δ₃, τ₃) ← inferExpr e3;
         let α ← mkFreshId;
-        let ξ ← biunify [(τ₁, .bool),(τ₂,.var α),  (τ₃, .var α)];
+        let ξ ← biunify [(τ₁, .bool), (τ₂, .var α), (τ₃, .var α)];
         let Δ := meet_env Δ₃ (meet_env Δ₂ Δ₁);
         pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
       }
-      | .letE x e1 e2 => do{
+      | .letE _ e1 e2 => do{
         let ty@(Δ₁, _)← inferExpr e1;
-        let (Δ₂, τ₂) ← extendEnv x ty (inferExpr e2);
+        let s ← mkFreshVar;
+        let e2' := open_expr s e2;
+        let (Δ₂, τ₂) ← extendPolyCtx s ty (inferExpr e2');
         let Δ := meet_env Δ₁ Δ₂;
         pure (Δ, τ₂)
       }
@@ -167,6 +227,18 @@ mutual
         pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
       }
     | .rcd f => inferRcd f
+    | .fix f e => do{
+      -- A typing rule mimicking Hindley-Milner
+      let s ← mkFreshVar;
+      let e' := open_expr s e;
+      let (Δ, τ) ← inferExpr e';
+      match Δ.get? s with
+        | .none => Except.error Impossible
+        | .some τ' => do{
+          let ξ ← biunify [(τ, τ')];
+          pure ((Δ.erase s).map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ τ)
+        }
+    }
     |_ => Except.error Impossible
     termination_by e => e.size
     decreasing_by
@@ -193,10 +265,22 @@ end
 def infer (e : Exp) : M Typing := do
   let t ← inferExpr e
   pure t
-#eval (inferExpr (.lam "x" (.bvar 0))).run
-#eval (inferExpr (.letE "f" (.lam "x" (.bvar 0)) (.app (.app (.fvar "f") (.fvar "f")) (.lbool false)))).run
-#eval (inferExpr
-  (.letE "f"
-    (.lam "x" (.bvar 0))
-      (.letE "_" (.app (.app (.fvar "f") (.fvar "f")) (.lbool false)) (.ifc (.app (.fvar "f") (.lbool true)) (.lbool true) (.lbool false))))).run
+
+#eval (inferExpr (.fix "g" (.lam "x" (.add (.app (.bvar 1) (.lint 2)) (.app (.bvar 1) (.lbool False)))))).run
+#eval (inferExpr (.fix "f" (.lam "x" (.bvar 1)))).run
+
+#eval (inferExpr ((.lam "g" (.lam "h1" (.lam "y" (.ifc (.lbool False) (.bvar 0) (.app (.bvar 2) (.app (.bvar 3) (.app (.bvar 2) (.app (.bvar 1) (.app (.bvar 3) (.app (.bvar 1) (.app (.bvar 2) (.bvar 0)))))))))))))).run
+
+#eval (inferExpr (.fix "x" (.app (.bvar 0) (.bvar 0)))).run
+#eval (inferExpr (.app (.fvar "f") (.fvar "f"))).run
+#eval (inferExpr (.add (.fvar "x") (.fvar "y"))).run
+
+#eval (inferExpr (.fix "f" (.lam "g" (.lam "y" (.ifc (.lbool False) (.bvar 0) (.app (.bvar 1) (.app (.bvar 2) (.app (.bvar 1) (.bvar 0))))))))).run
+-- FIxpoint combinator
+#eval (inferExpr (.lam "f"
+  (.app (.lam "x" (.app (.bvar 1) (.lam "v" (.app (.app (.bvar 1) (.bvar 1)) (.bvar 0)))))
+              (.lam "x" (.app (.bvar 1) (.lam "v" (.app (.app (.bvar 1) (.bvar 1)) (.bvar 0)))))))).run
+
+#eval (inferExpr (.lam "x" (.ifc (.proj (.bvar 0) "p") (.proj (.bvar 0) "q") (.proj (.bvar 0) "q")))).run
+#eval (inferExpr (.fix "f" (.lam "x" (.bvar 0)))).run
 end TypeChecker
