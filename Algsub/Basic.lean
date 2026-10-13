@@ -22,6 +22,9 @@ mutual
     | iszero : Exp → Exp
     | add : Exp → Exp → Exp
     | mul : Exp → Exp → Exp
+    | not : Exp → Exp
+    | and : Exp → Exp → Exp
+    | or : Exp → Exp → Exp
     | proj : Exp → String → Exp
     deriving BEq, Repr
   inductive Fields : Type where
@@ -67,7 +70,7 @@ end
 def TyField.Repr [Repr α] : TyField α → String
   | .nil => ""
   | .cons l τ .nil => l ++ " : " ++ (repr τ).pretty
-  | .cons l τ flds => l ++ ":" ++ (repr τ).pretty ++ flds.Repr
+  | .cons l τ flds => l ++ ":" ++ (repr τ).pretty ++ "," ++ flds.Repr
 
 mutual
 def PType.Repr : PType → String
@@ -83,7 +86,7 @@ def PType.Repr : PType → String
 def posrcd_repr : TyField PType → String
   | .nil => ""
   | .cons l τ .nil => l ++ ":" ++ τ.Repr
-  | .cons l τ flds => l ++ ":" ++ τ.Repr ++ posrcd_repr flds
+  | .cons l τ flds => l ++ ":" ++ τ.Repr ++ "," ++ posrcd_repr flds
 
 def NType.Repr : NType → String
   | .bool => "bool"
@@ -120,6 +123,7 @@ inductive Exception where
   | CannotBiunify (τ₁ τ₂ : Ty)
   | Circular
   | Impossible
+  | NameClash (x : String)
   | TypeErr (e : Exp) (e : Exception)
   deriving Repr
 
@@ -222,8 +226,8 @@ def compose (σ₁ σ₂ : Bisubst) : Bisubst :=
 mutual
 def fv : Exp → Finset String
   | .bvar _ | .lint _ | .lbool _ | .const _ => {}
-  | .iszero t | .pred t | .succ t => fv t
-  | .mul e1 e2 | .add e1 e2 => fv e1 ∪ fv e2
+  | .iszero t | .pred t | .succ t | .not t => fv t
+  | .mul e1 e2 | .add e1 e2 | .or e1 e2 | .and e1 e2=> fv e1 ∪ fv e2
   | .fvar x => {x}
   | .app t1 t2 => fv t1 ∪ fv t2
   | .lam _ t => fv t
@@ -266,14 +270,15 @@ end
 mutual
 def numBinders : Exp → ℕ
   | .bvar _|.lbool _ | .lint _ | .fvar _ | .const _=> 0
-  | .lam _ e | .iszero e | .pred e | .succ e => numBinders e + 1
+  | .lam _ e | .iszero e  => numBinders e + 1
   | .letE _ e1 e2 => max (numBinders e2 + 1) (numBinders e1)
   | .ifc e1 e2 e3 => max (max (numBinders e1) (numBinders e2)) (numBinders e3)
   | .fix _ e => numBinders e + 1
   | .app e1 e2=> max (numBinders e1) (numBinders e2)
-  | .add e1 e2| .mul e1 e2 => max (numBinders e1) (numBinders e2)
+  | .add e1 e2| .mul e1 e2 | .and e1 e2 | .or e1 e2=> max (numBinders e1) (numBinders e2)
   | .seq e1 e2 => max (numBinders e1) (numBinders e2)
   | .proj e _ => numBinders e
+  | .pred e | .succ e | .not e => numBinders e
   | .rcd f => numBinders_rcd f
 
 def numBinders_rcd : Fields → ℕ
@@ -312,8 +317,8 @@ mutual
 @[simp]
 def Exp.size : Exp → ℕ
   | .bvar _ | .fvar _ | .lbool _ | .lint _ | .const _ => 1
-  | .app e1 e2 | .seq e1 e2  | .add e1 e2 | .mul e1 e2    => 1 + e1.size + e2.size
-  | .lam _ e | .fix _ e| .iszero e | .pred e | .succ e      => 1 + e.size
+  | .app e1 e2 | .seq e1 e2  | .add e1 e2 | .mul e1 e2  | .and e1 e2 | .or e1 e2  => 1 + e1.size + e2.size
+  | .lam _ e | .fix _ e| .iszero e | .pred e | .succ e   | .not e   => 1 + e.size
   | .ifc e1 e2 e3   => 1 + e1.size + e2.size + e3.size
   | .letE _ e1 e2   => 1 + e1.size + e2.size
   | .proj e _       => 1 + e.size
@@ -565,9 +570,12 @@ def open_expr_at (k : ℕ) (x : String) : Exp → Exp
   | .iszero t => .iszero (open_expr_at k x t)
   | .pred t => .pred (open_expr_at k x t)
   | .succ t => .succ (open_expr_at k x t)
+  | .not t => .not (open_expr_at k x t)
   | .app t₁ t₂ => .app (open_expr_at k x t₁) (open_expr_at k x t₂)
   | .add t₁ t₂ => .add (open_expr_at k x t₁) (open_expr_at k x t₂)
   | .mul t₁ t₂ => .mul (open_expr_at k x t₁) (open_expr_at k x t₂)
+  | .and t₁ t₂ => .and (open_expr_at k x t₁) (open_expr_at k x t₂)
+  | .or t₁ t₂ => .or (open_expr_at k x t₁) (open_expr_at k x t₂)
   | .seq t₁ t₂ => .seq (open_expr_at k x t₁) (open_expr_at (k + 1) x t₂)
   | .lam y t => .lam y (open_expr_at (k + 1) x t)
   | .ifc t₁ t₂ t₃ => .ifc (open_expr_at k x t₁) (open_expr_at k x t₂) (open_expr_at k x t₃)
@@ -602,11 +610,19 @@ theorem Exp.induct
   (ind_iszero : ∀ e, motive e → motive (.iszero e))
   (ind_add : ∀ e1 e2, motive e1 → motive e2 → motive (.add e1 e2))
   (ind_mul : ∀ e1 e2, motive e1 → motive e2 → motive (.mul e1 e2))
+  (ind_not : ∀ e, motive e → motive (.not e))
+  (ind_and : ∀ e1 e2, motive e1 → motive e2 → motive (.and e1 e2))
+  (ind_or : ∀ e1 e2, motive e1 → motive e2 → motive (.or e1 e2))
   (e : Exp) : motive e :=
   Exp.rec (motive_1 := motive) (motive_2 := fun fs => motive (.rcd fs))
     base_bvar base_fvar base_const ind_app base_bool base_int ind_lam ind_fix
     (fun _f ih => ih)
-    ind_if ind_let ind_seq ind_succ ind_pred ind_iszero ind_add ind_mul ind_proj
+    ind_if
+    ind_let
+    ind_seq
+    ind_succ
+    ind_pred
+    ind_iszero ind_add ind_mul ind_not ind_and ind_or ind_proj
     base_nil ind_cons
     e
 
@@ -647,7 +663,7 @@ theorem NType.induct
   (ind_meet : ∀ τ₁ τ₂, motive (.neg τ₁) → motive (.neg τ₂) → motive (.neg (.meet τ₁ τ₂)))
   (ind_rcd : ∀ x τ τ', motive (.neg τ) → motive (.neg (.rcd τ')) → motive (.neg (.rcd (.cons x τ τ'))))
   (ind_fix : ∀ n τ, motive (.neg τ) → motive (.neg (.fix n τ)))
-  (τ : NType) : motive (.neg τ) :=sorry
+  (τ : NType) : motive (.neg τ) := sorry
   /-NType.rec
   (motive_1 := motive)
   (motive_2 := fun p => motive (.pos p))
@@ -674,9 +690,11 @@ theorem opening_preserves_size : ∀ k x e, (open_expr_at k x e).size = e.size :
       simp only  [open_expr_at, Exp.size, h1, h2]
     | ind_fix y e h => simp only [open_expr_at, Exp.size, h]
     | ind_pred e h | ind_succ e h | ind_iszero e h => simp[h]
-    | ind_add e1 e2 h1 h2 | ind_mul e1 e2 h1 h2 => simp[open_expr_at, Exp.size, h1, h2]
+    | ind_add e1 e2 h1 h2 | ind_mul e1 e2 h1 h2 | ind_and e1 e2 h1 h2  | ind_or e1 e2 h1 h2
+        => simp[open_expr_at, Exp.size, h1, h2]
     | ind_if e1 e2 e3 h1 h2 h3 => simp only [open_expr_at, Exp.size, h1,h2,h3]
     | ind_let y e1 e2 h1 h2 => simp only [open_expr_at, Exp.size, h1,h2]
+    | ind_not e h => simp only [open_expr_at, Exp.size, h]
     | ind_cons y e fs he hfs =>
         simp at hfs
         simp only [open_expr_at,open_rcd_at, Exp.size, Fields.size, he,hfs]
