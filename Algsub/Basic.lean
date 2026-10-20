@@ -2,54 +2,18 @@ import Mathlib.Tactic
 import Mathlib.Control.Traversable.Basic
 import Std.Data.TreeMap
 import Std.Data.HashSet
-/- Patterns bind variables by *slot*: in `Exp.lam p e` the binding occurrence `pbvar j`
-is referred to by `bvar j` in `e` (by `bvar (j + n)` under `n` further binders), so `lam p`
-binds `p.arity` de Bruijn indices at once.  Explicit slots let both branches of `por` bind
-the same variables regardless of where they occur; `pfvar` only arises from opening.
-Patterns contain no expressions, hence no references to enclosing binders. -/
-mutual
-  inductive Pat : Type where
-    | pbvar : ℕ → Pat
-    | pfvar : String → Pat
-    | pwild : Pat
-    | plbool : Bool → Pat
-    | plint : Int → Pat
-    | prcd : PatFields → Pat
-    | pinj : String → Pat → Pat
-    | pand : Pat → Pat → Pat
-    | por : Pat → Pat → Pat
-    deriving BEq, Repr
-  inductive PatFields : Type where
-    | nil : PatFields
-    | cons : String → Pat → PatFields → PatFields
-    deriving BEq, Repr
-end
-
-mutual
-/-- Number of de Bruijn indices bound by a pattern: one past its largest slot. -/
-def Pat.arity : Pat → ℕ
-  | .pbvar j => j + 1
-  | .pfvar _ | .pwild | .plbool _ | .plint _ => 0
-  | .prcd fs => fs.arity
-  | .pinj _ p => p.arity
-  | .pand p q | .por p q => max p.arity q.arity
-def PatFields.arity : PatFields → ℕ
-  | .nil => 0
-  | .cons _ p fs => max p.arity fs.arity
-end
-
 mutual
   inductive Exp : Type where
+  /-- Fixme : translate to locally nameless -/
     | bvar : ℕ → Exp
     | fvar : String → Exp
     | const : String → Exp
     | app : Exp → Exp → Exp
     | lbool : Bool → Exp
     | lint : Int → Exp
-    | lam : Pat → Exp → Exp
+    | lam : String → Exp → Exp
     | fix : String → Exp → Exp
     | rcd : Fields → Exp
-    | inj : String → Exp → Exp
     | ifc : Exp → Exp → Exp → Exp
     | letE : String → Exp → Exp → Exp
     | seq : Exp → Exp → Exp
@@ -58,18 +22,14 @@ mutual
     | iszero : Exp → Exp
     | add : Exp → Exp → Exp
     | mul : Exp → Exp → Exp
+    | not : Exp → Exp
+    | and : Exp → Exp → Exp
+    | or : Exp → Exp → Exp
     | proj : Exp → String → Exp
-    /-- `match e with | p₁ -> b₁ | …`: each clause binds its pattern's slots in its
-    body, as `lam` does. -/
-    | case : Exp → Clauses → Exp
     deriving BEq, Repr
   inductive Fields : Type where
     | nil : Fields
     | cons : String → Exp → Fields → Fields
-    deriving BEq, Repr
-  inductive Clauses : Type where
-    | nil : Clauses
-    | cons : Pat → Exp → Clauses → Clauses
     deriving BEq, Repr
 end
 
@@ -92,7 +52,6 @@ inductive PType : Type where
   | var : ℕ → PType
   | arr : NType → PType → PType
   | rcd : TyField PType → PType
-  | sum : TyField PType → PType
   | join : PType → PType → PType
   | fix : ℕ → PType → PType
   | bot : PType
@@ -103,7 +62,6 @@ inductive NType : Type where
   | var : ℕ → NType
   | arr : PType → NType → NType
   | rcd : TyField NType → NType
-  | sum : TyField NType → NType
   | meet : NType → NType → NType
   | top : NType
   | fix : ℕ → NType → NType
@@ -112,7 +70,7 @@ end
 def TyField.Repr [Repr α] : TyField α → String
   | .nil => ""
   | .cons l τ .nil => l ++ " : " ++ (repr τ).pretty
-  | .cons l τ flds => l ++ ":" ++ (repr τ).pretty ++ flds.Repr
+  | .cons l τ flds => l ++ ":" ++ (repr τ).pretty ++ "," ++ flds.Repr
 
 mutual
 def PType.Repr : PType → String
@@ -124,11 +82,11 @@ def PType.Repr : PType → String
   | .var n => "v" ++ n.repr
   | .int => "ℤ"
   | .rcd fld => "{" ++ posrcd_repr fld ++ "}"
-  | .sum fld => "[" ++ posrcd_repr fld ++ "]"
+
 def posrcd_repr : TyField PType → String
   | .nil => ""
   | .cons l τ .nil => l ++ ":" ++ τ.Repr
-  | .cons l τ flds => l ++ ":" ++ τ.Repr ++ posrcd_repr flds
+  | .cons l τ flds => l ++ ":" ++ τ.Repr ++ "," ++ posrcd_repr flds
 
 def NType.Repr : NType → String
   | .bool => "bool"
@@ -139,7 +97,7 @@ def NType.Repr : NType → String
   | .meet τ₁ τ₂ => "(" ++ τ₁.Repr ++ "⊓" ++ τ₂.Repr ++ ")"
   | .arr τ₁ τ₂ => "(" ++ τ₁.Repr ++ "→" ++  τ₂.Repr ++ ")"
   | .rcd fld => "{" ++ negrcd_repr fld ++ "}"
-  | .sum fld => "[" ++ negrcd_repr fld ++ "]"
+
 def negrcd_repr : TyField NType → String
   | .nil => ""
   | .cons l τ .nil => l ++ ":" ++ τ.Repr
@@ -165,13 +123,8 @@ inductive Exception where
   | CannotBiunify (τ₁ τ₂ : Ty)
   | Circular
   | Impossible
+  | NameClash (x : String)
   | TypeErr (e : Exp) (e : Exception)
-  /-- A slot bound twice (`&`, record fields), by only one side of `|`, or not at all. -/
-  | IllFormedPat (p : Pat)
-  /-- Some value of the type a lambda's pattern demands fails to match it. -/
-  | RefutablePat (p : Pat)
-  /-- The alternatives of an or-pattern demand types with no negative join. -/
-  | CannotJoin (τ₁ τ₂ : Ty)
   deriving Repr
 
 deriving instance Hashable,BEq for Constraint
@@ -236,7 +189,6 @@ def apply_pos (σ : Bisubst) : PType → PType
   | .join t1 t2 => .join (apply_pos σ t1) (apply_pos σ t2)
   | .arr t1 t2 => .arr (apply_neg σ t1) (apply_pos σ t2)
   | .rcd fs => .rcd (apply_pos_rcd σ fs)
-  | .sum fs => .sum (apply_pos_rcd σ fs)
   | .fix n τ => .fix n (apply_pos σ τ)
 def apply_neg (σ : Bisubst) : NType → NType
   | .var n =>
@@ -249,7 +201,6 @@ def apply_neg (σ : Bisubst) : NType → NType
   | .meet t1 t2 => .meet (apply_neg σ t1) (apply_neg σ t2)
   | .arr t1 t2 => .arr (apply_pos σ t1) (apply_neg σ t2)
   | .rcd fs => .rcd (apply_neg_rcd σ fs)
-  | .sum fs => .sum (apply_neg_rcd σ fs)
   | .fix n τ   => .fix n (apply_neg σ τ)
 
 def apply_pos_rcd (σ : Bisubst) : TyField PType → TyField PType
@@ -275,13 +226,8 @@ def compose (σ₁ σ₂ : Bisubst) : Bisubst :=
 mutual
 def fv : Exp → Finset String
   | .bvar _ | .lint _ | .lbool _ | .const _ => {}
-<<<<<<< HEAD
-  | .iszero t | .pred t | .succ t | .not t | .inj _ t => fv t
+  | .iszero t | .pred t | .succ t | .not t => fv t
   | .mul e1 e2 | .add e1 e2 | .or e1 e2 | .and e1 e2=> fv e1 ∪ fv e2
-=======
-  | .iszero t | .pred t | .succ t => fv t
-  | .mul e1 e2 | .add e1 e2 => fv e1 ∪ fv e2
->>>>>>> parent of 60012f4 (refactor: update language syntax and structure with new parser, type definitions, and typing rules)
   | .fvar x => {x}
   | .app t1 t2 => fv t1 ∪ fv t2
   | .lam _ t => fv t
@@ -291,29 +237,24 @@ def fv : Exp → Finset String
   | .rcd fs => fv_rcd fs
   | .proj e _ => fv e
   | .letE _ e1 e2 => fv e1 ∪ fv e2
-  | .case e cs => fv e ∪ fv_clauses cs
 
 def fv_rcd : Fields → Finset String
   | .nil => {}
   | .cons _ e fs => fv e ∪ fv_rcd fs
-
-def fv_clauses : Clauses → Finset String
-  | .nil => {}
-  | .cons _ b cs => fv b ∪ fv_clauses cs
 end
 mutual
 def isftv_pos (n : ℕ) : PType → Bool
   | .var m => m == n
   | .bot | .int | .bool  => false
   | .join τ₁ τ₂ => isftv_pos n τ₁ || isftv_pos n τ₂
-  | .rcd f | .sum f => isftv_posrcd n f
+  | .rcd f => isftv_posrcd n f
   | .arr τ₁ τ₂ => isftv_neg n τ₁ || isftv_pos n τ₂
   | .fix _ τ => isftv_pos n τ
 def isftv_neg (n : ℕ) : NType → Bool
  | .var m => m == n
  | .top | .int | .bool => false
  | .meet τ₁ τ₂ => isftv_neg n τ₁ || isftv_neg n τ₂
- | .rcd f | .sum f => isftv_negrcd n f
+ | .rcd f => isftv_negrcd n f
  | .arr τ₁ τ₂ => isftv_pos n τ₁ || isftv_neg n τ₂
  | .fix _ τ => isftv_neg n τ
 
@@ -329,33 +270,20 @@ end
 mutual
 def numBinders : Exp → ℕ
   | .bvar _|.lbool _ | .lint _ | .fvar _ | .const _=> 0
-<<<<<<< HEAD
-  | .lam p e => numBinders e + p.arity
-=======
-  | .lam _ e | .iszero e | .pred e | .succ e => numBinders e + 1
->>>>>>> parent of 60012f4 (refactor: update language syntax and structure with new parser, type definitions, and typing rules)
+  | .lam _ e | .iszero e  => numBinders e + 1
   | .letE _ e1 e2 => max (numBinders e2 + 1) (numBinders e1)
   | .ifc e1 e2 e3 => max (max (numBinders e1) (numBinders e2)) (numBinders e3)
   | .fix _ e => numBinders e + 1
   | .app e1 e2=> max (numBinders e1) (numBinders e2)
-  | .add e1 e2| .mul e1 e2 => max (numBinders e1) (numBinders e2)
+  | .add e1 e2| .mul e1 e2 | .and e1 e2 | .or e1 e2=> max (numBinders e1) (numBinders e2)
   | .seq e1 e2 => max (numBinders e1) (numBinders e2)
-<<<<<<< HEAD
-  | .proj e _ | .inj _ e => numBinders e
-  | .pred e | .succ e | .not e | .iszero e => numBinders e
-=======
   | .proj e _ => numBinders e
->>>>>>> parent of 60012f4 (refactor: update language syntax and structure with new parser, type definitions, and typing rules)
+  | .pred e | .succ e | .not e => numBinders e
   | .rcd f => numBinders_rcd f
-  | .case e cs => max (numBinders e) (numBinders_clauses cs)
 
 def numBinders_rcd : Fields → ℕ
   | .nil => 0
   | .cons _ e fs => max (numBinders e) (numBinders_rcd fs)
-
-def numBinders_clauses : Clauses → ℕ
-  | .nil => 0
-  | .cons p b cs => max (numBinders b + p.arity) (numBinders_clauses cs)
 end
 instance : Traversable TyField where
   map := rcd_map
@@ -366,14 +294,14 @@ def ftvs_pos : PType → Set ℕ
   | .var m => {m}
   | .bot | .int | .bool => {}
   | .join τ₁ τ₂ => ftvs_pos τ₁ ∪ ftvs_pos τ₂
-  | .rcd f | .sum f => ftvs_posrcd f
+  | .rcd f => ftvs_posrcd f
   | .arr τ₁ τ₂ => ftvs_neg τ₁ ∪ ftvs_pos τ₂
   | .fix n τ => ftvs_pos τ \ {n}
 def ftvs_neg : NType → Set ℕ
   | .var m => {m}
   | .top | .int | .bool => {}
   | .meet τ₁ τ₂ => ftvs_neg τ₁ ∪ ftvs_neg τ₂
-  | .rcd f | .sum f => ftvs_negrcd f
+  | .rcd f => ftvs_negrcd f
   | .arr τ₁ τ₂ => ftvs_pos τ₁ ∪ ftvs_neg τ₂
   | .fix n τ => ftvs_neg τ \ {n}
 def ftvs_posrcd : TyField PType → Set ℕ
@@ -389,21 +317,16 @@ mutual
 @[simp]
 def Exp.size : Exp → ℕ
   | .bvar _ | .fvar _ | .lbool _ | .lint _ | .const _ => 1
-  | .app e1 e2 | .seq e1 e2  | .add e1 e2 | .mul e1 e2    => 1 + e1.size + e2.size
-  | .lam _ e | .fix _ e| .iszero e | .pred e | .succ e      => 1 + e.size
+  | .app e1 e2 | .seq e1 e2  | .add e1 e2 | .mul e1 e2  | .and e1 e2 | .or e1 e2  => 1 + e1.size + e2.size
+  | .lam _ e | .fix _ e| .iszero e | .pred e | .succ e   | .not e   => 1 + e.size
   | .ifc e1 e2 e3   => 1 + e1.size + e2.size + e3.size
   | .letE _ e1 e2   => 1 + e1.size + e2.size
-  | .proj e _ | .inj _ e      => 1 + e.size
+  | .proj e _       => 1 + e.size
   | .rcd f          => 1 + f.size
-  | .case e cs      => 1 + e.size + cs.size
 @[simp]
 def Fields.size : Fields → ℕ
   | .nil          => 1
   | .cons _ e fs  => 1 + e.size + fs.size
-@[simp]
-def Clauses.size : Clauses → ℕ
-  | .nil          => 1
-  | .cons _ b cs  => 1 + b.size + cs.size
 end
 
 mutual
@@ -412,13 +335,13 @@ def free_in_pos : PType → Set ℕ
   | .var n => {n}
   | .arr t1 t2 => free_in_neg t1 ∪ free_in_pos t2
   | .join t1 t2 => free_in_pos t1 ∪ free_in_pos t2
-  | .rcd fs | .sum fs => free_in_posrcd fs
+  | .rcd fs => free_in_posrcd fs
   | .fix n t => free_in_pos t \ {n}
 def free_in_neg : NType → Set ℕ
   | .bool | .int | .top => {}
   | .var n => {n}
   | .arr t1 t2 =>free_in_pos t1 ∪ free_in_neg t2
-  | .rcd fs | .sum fs => free_in_negrcd fs
+  | .rcd fs => free_in_negrcd fs
   | .meet t1 t2 => free_in_neg t1 ∪ free_in_neg t2
   | .fix n t => free_in_neg t \ {n}
 
@@ -557,7 +480,7 @@ partial def occP (bnd : List ℕ) : PType → List (ℕ × Bool)
   | .bool | .int | .bot => []
   | .join a b => occP bnd a ++ occP bnd b
   | .arr d c => occN bnd d ++ occP bnd c
-  | .rcd f | .sum f => occPRcd bnd f
+  | .rcd f => occPRcd bnd f
   | .fix n t => occP (n :: bnd) t
 /-- Free type-variable occurrences in a negative type, paired with `false`. -/
 partial def occN (bnd : List ℕ) : NType → List (ℕ × Bool)
@@ -565,7 +488,7 @@ partial def occN (bnd : List ℕ) : NType → List (ℕ × Bool)
   | .bool | .int | .top => []
   | .meet a b => occN bnd a ++ occN bnd b
   | .arr d c => occP bnd d ++ occN bnd c
-  | .rcd f | .sum f => occNRcd bnd f
+  | .rcd f => occNRcd bnd f
   | .fix n t => occN (n :: bnd) t
 partial def occPRcd (bnd : List ℕ) : TyField PType → List (ℕ × Bool)
   | .nil => []
@@ -647,54 +570,23 @@ def open_expr_at (k : ℕ) (x : String) : Exp → Exp
   | .iszero t => .iszero (open_expr_at k x t)
   | .pred t => .pred (open_expr_at k x t)
   | .succ t => .succ (open_expr_at k x t)
+  | .not t => .not (open_expr_at k x t)
   | .app t₁ t₂ => .app (open_expr_at k x t₁) (open_expr_at k x t₂)
   | .add t₁ t₂ => .add (open_expr_at k x t₁) (open_expr_at k x t₂)
   | .mul t₁ t₂ => .mul (open_expr_at k x t₁) (open_expr_at k x t₂)
-<<<<<<< HEAD
   | .and t₁ t₂ => .and (open_expr_at k x t₁) (open_expr_at k x t₂)
   | .or t₁ t₂ => .or (open_expr_at k x t₁) (open_expr_at k x t₂)
-  | .seq t₁ t₂ => .seq (open_expr_at k x t₁) (open_expr_at k x t₂)
-  -- `p`'s slots belong to this binder, not to `k`, so `p` itself is left untouched.
-  | .lam p t => .lam p (open_expr_at (k + p.arity) x t)
-=======
   | .seq t₁ t₂ => .seq (open_expr_at k x t₁) (open_expr_at (k + 1) x t₂)
   | .lam y t => .lam y (open_expr_at (k + 1) x t)
->>>>>>> parent of 60012f4 (refactor: update language syntax and structure with new parser, type definitions, and typing rules)
   | .ifc t₁ t₂ t₃ => .ifc (open_expr_at k x t₁) (open_expr_at k x t₂) (open_expr_at k x t₃)
   | .fix y t => .fix y (open_expr_at (k + 1) x t)
   | .proj f y => .proj (open_expr_at k x f) y
-  | .inj l t => .inj l (open_expr_at k x t)
   | .letE y t₁ t₂ => .letE y (open_expr_at k x t₁) (open_expr_at (k + 1) x t₂)
   | .rcd f => .rcd (open_rcd_at k x f)
-  | .case t cs => .case (open_expr_at k x t) (open_clauses_at k x cs)
   @[simp]
 def open_rcd_at (k : ℕ) (x : String) : Fields → Fields
   | .nil => .nil
   | .cons l e fs => .cons l (open_expr_at k x e) (open_rcd_at k x fs)
-@[simp]
-def open_clauses_at (k : ℕ) (x : String) : Clauses → Clauses
-  | .nil => .nil
-  | .cons p b cs => .cons p (open_expr_at (k + p.arity) x b) (open_clauses_at k x cs)
-end
-
-/- Opening the binder of `lam p e` names slot `j` in the pattern and index `j` in the body
-alike: `open_pat_at j x p` together with `open_expr_at j x e`, for each `j < p.arity`. -/
-mutual
-@[simp]
-def open_pat_at (k : ℕ) (x : String) : Pat → Pat
-  | .pbvar j => if j == k then .pfvar x else .pbvar j
-  | .pfvar y => .pfvar y
-  | .pwild => .pwild
-  | .plbool b => .plbool b
-  | .plint n => .plint n
-  | .prcd fs => .prcd (open_prcd_at k x fs)
-  | .pinj l p => .pinj l (open_pat_at k x p)
-  | .pand p q => .pand (open_pat_at k x p) (open_pat_at k x q)
-  | .por p q => .por (open_pat_at k x p) (open_pat_at k x q)
-@[simp]
-def open_prcd_at (k : ℕ) (x : String) : PatFields → PatFields
-  | .nil => .nil
-  | .cons l p fs => .cons l (open_pat_at k x p) (open_prcd_at k x fs)
 end
 @[elab_as_elim]
 theorem Exp.induct
@@ -705,7 +597,7 @@ theorem Exp.induct
   (base_bvar : ∀ n, motive (.bvar n))
   (base_fvar : ∀ s, motive (.fvar s))
   (base_nil : motive (.rcd .nil))
-  (ind_lam : ∀ p e, motive e → motive (.lam p e))
+  (ind_lam : ∀ x e, motive e → motive (.lam x e))
   (ind_app : ∀ e1 e2, motive e1 → motive e2 → motive (.app e1 e2))
   (ind_seq : ∀ e1 e2, motive e1 → motive e2 → motive (.seq e1 e2))
   (ind_fix : ∀ x e, motive e → motive (.fix x e))
@@ -713,45 +605,27 @@ theorem Exp.induct
   (ind_let : ∀ x e1 e2, motive e1 → motive e2 → motive (.letE x e1 e2))
   (ind_cons : ∀ x e fs, motive e → motive (.rcd fs) → motive (.rcd (.cons x e fs)))
   (ind_proj : ∀ e x, motive e → motive (.proj e x))
-  (ind_inj : ∀ l e, motive e → motive (.inj l e))
   (ind_succ : ∀e, motive e → motive (.succ e))
   (ind_pred : ∀ e, motive e → motive (.pred e))
   (ind_iszero : ∀ e, motive e → motive (.iszero e))
   (ind_add : ∀ e1 e2, motive e1 → motive e2 → motive (.add e1 e2))
   (ind_mul : ∀ e1 e2, motive e1 → motive e2 → motive (.mul e1 e2))
-<<<<<<< HEAD
   (ind_not : ∀ e, motive e → motive (.not e))
   (ind_and : ∀ e1 e2, motive e1 → motive e2 → motive (.and e1 e2))
   (ind_or : ∀ e1 e2, motive e1 → motive e2 → motive (.or e1 e2))
-  (base_case : ∀ e, motive e → motive (.case e .nil))
-  (ind_clause : ∀ e p b cs, motive e → motive b → motive (.case e cs) →
-    motive (.case e (.cons p b cs)))
-=======
->>>>>>> parent of 60012f4 (refactor: update language syntax and structure with new parser, type definitions, and typing rules)
   (e : Exp) : motive e :=
   Exp.rec (motive_1 := motive) (motive_2 := fun fs => motive (.rcd fs))
-    (motive_3 := fun cs => ∀ e, motive e → motive (.case e cs))
     base_bvar base_fvar base_const ind_app base_bool base_int ind_lam ind_fix
     (fun _f ih => ih)
-<<<<<<< HEAD
-    ind_inj
     ind_if
     ind_let
     ind_seq
     ind_succ
     ind_pred
     ind_iszero ind_add ind_mul ind_not ind_and ind_or ind_proj
-    (fun e _ he hcs => hcs e he)
-=======
-    ind_if ind_let ind_seq ind_succ ind_pred ind_iszero ind_add ind_mul ind_proj
->>>>>>> parent of 60012f4 (refactor: update language syntax and structure with new parser, type definitions, and typing rules)
     base_nil ind_cons
-    base_case
-    (fun p b cs hb hcs e he => ind_clause e p b cs he hb (hcs e he))
     e
 
-<<<<<<< HEAD
-=======
 mutual
 @[elab_as_elim]
 theorem PType.induct
@@ -789,7 +663,7 @@ theorem NType.induct
   (ind_meet : ∀ τ₁ τ₂, motive (.neg τ₁) → motive (.neg τ₂) → motive (.neg (.meet τ₁ τ₂)))
   (ind_rcd : ∀ x τ τ', motive (.neg τ) → motive (.neg (.rcd τ')) → motive (.neg (.rcd (.cons x τ τ'))))
   (ind_fix : ∀ n τ, motive (.neg τ) → motive (.neg (.fix n τ)))
-  (τ : NType) : motive (.neg τ) :=sorry
+  (τ : NType) : motive (.neg τ) := sorry
   /-NType.rec
   (motive_1 := motive)
   (motive_2 := fun p => motive (.pos p))
@@ -802,7 +676,6 @@ theorem NType.induct
   ind_meet base_top ind_fix _ _ _ _ τ
 -/
 end
->>>>>>> parent of 60012f4 (refactor: update language syntax and structure with new parser, type definitions, and typing rules)
 
 theorem opening_preserves_size : ∀ k x e, (open_expr_at k x e).size = e.size := by
   intros k x e
@@ -810,50 +683,28 @@ theorem opening_preserves_size : ∀ k x e, (open_expr_at k x e).size = e.size :
     | base_bool b | base_int n | base_fvar x | base_nil | base_const c => simp
     | base_bvar m =>
         by_cases h : m == k <;> simp[h]
-    | ind_lam p e h =>simp only [open_expr_at, Exp.size, h]
+    | ind_lam y e h =>simp only [open_expr_at, Exp.size, h]
     | ind_app e1 e2 h1 h2 =>
       simp only [open_expr_at, Exp.size, h1,h2]
     | ind_seq e1 e2 h1 h2 =>
       simp only  [open_expr_at, Exp.size, h1, h2]
     | ind_fix y e h => simp only [open_expr_at, Exp.size, h]
     | ind_pred e h | ind_succ e h | ind_iszero e h => simp[h]
-    | ind_add e1 e2 h1 h2 | ind_mul e1 e2 h1 h2 => simp[open_expr_at, Exp.size, h1, h2]
+    | ind_add e1 e2 h1 h2 | ind_mul e1 e2 h1 h2 | ind_and e1 e2 h1 h2  | ind_or e1 e2 h1 h2
+        => simp[open_expr_at, Exp.size, h1, h2]
     | ind_if e1 e2 e3 h1 h2 h3 => simp only [open_expr_at, Exp.size, h1,h2,h3]
     | ind_let y e1 e2 h1 h2 => simp only [open_expr_at, Exp.size, h1,h2]
+    | ind_not e h => simp only [open_expr_at, Exp.size, h]
     | ind_cons y e fs he hfs =>
         simp at hfs
         simp only [open_expr_at,open_rcd_at, Exp.size, Fields.size, he,hfs]
     | ind_proj e y h => simp only [open_expr_at, Exp.size, h]
-    | ind_inj l e h => simp only [open_expr_at, Exp.size, h]
-    | base_case e he => simp only [open_expr_at, open_clauses_at, Exp.size, Clauses.size, he]
-    | ind_clause e p b cs he hb hcs =>
-        have h := hcs k
-        simp only [open_expr_at, open_clauses_at, Exp.size, Clauses.size, he, hb] at h ⊢
-        omega
 
 
 def open_expr x e := open_expr_at 0 x e
 
-def open_pat x p := open_pat_at 0 x p
-
 theorem opening_preserves_size' : ∀ x e, (open_expr x e).size = e.size := by
   apply opening_preserves_size
-
-/-- Open slots `k, k + 1, …` of a binder with the names `xs`, in order.  Opening never
-renumbers the remaining indices, so the slots can be opened one at a time. -/
-def open_expr_slots (k : ℕ) : List String → Exp → Exp
-  | [], e => e
-  | x :: xs, e => open_expr_slots (k + 1) xs (open_expr_at k x e)
-
-def open_pat_slots (k : ℕ) : List String → Pat → Pat
-  | [], p => p
-  | x :: xs, p => open_pat_slots (k + 1) xs (open_pat_at k x p)
-
-theorem opening_slots_preserves_size : ∀ k xs e, (open_expr_slots k xs e).size = e.size := by
-  intros k xs e
-  induction xs generalizing k e with
-    | nil => rfl
-    | cons x xs ih => simp only [open_expr_slots, ih, opening_preserves_size]
 
 namespace Types
 inductive Polarity | pos | neg
@@ -874,48 +725,7 @@ inductive Head (α : Type) where
   | base (stamp : ℕ) (args : List (TyArg α))
 deriving BEq, Repr
 
-abbrev StateId := ℕ
-abbrev DStateId := ℕ
-
-structure State where
-  pol : Polarity
-  cons : List (Head (Std.HashSet StateId))
-  flow : Std.HashSet StateId
-  deriving Repr
-
-structure DState where
-  pol : Polarity
-  cons : List (Head DStateId)
-  flow : Std.HashSet DStateId
-  deriving Repr
-
-abbrev Automata := Array State
-abbrev DAutomata := Array DState
-
-inductive Ty where
-  | var (v : Symbol)
-  | zero
-  | add (a b : Ty)
-  | fix (v : Symbol) (τ : Ty)
-  | cons (h : Head Ty)
-  deriving Repr
-
-inductive Node (i : Type) where
-  | var (v : Symbol)
-  | zero
-  | sum (a b : i)
-  | fix (body : i)
-  | fixVar (binder : i)
-  | cons (h : Head i)
-  deriving BEq, Repr, Inhabited
-
-inductive Variance
-  | VPos | VNeg | VNegPos | None
-  deriving BEq, Repr
-
-structure TyCtx where
-  next : ℕ := 1
-  decls : Std.HashMap ℕ (Symbol × Array Variance) := {}
-  byName : Std.HashMap Symbol ℕ := {}
+inductive TypeLat (α : Type) where
+  | LZero | LUnexpanded 
 
 end Types
