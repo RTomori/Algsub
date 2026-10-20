@@ -57,6 +57,7 @@ def atomic (c : Constraint) : Bool :=
         match t1, t2 with
                             | .var _, .arr _ _ | .var _, .rcd _ | .var _, .var _ => true
                             | .arr _ _, .var _| .rcd _ , .var _ => true
+                            | .var _, .sum _ | .sum _, .var _ => true
                             | .bool, .var _ | .var _, .bool => true
                             | .int, .var _|.var _, .int => true
                             | _, _ => false
@@ -81,12 +82,23 @@ def subi : Constraint →  M (List Constraint)
         | τ, .meet τ₁ τ₂ => pure [(τ, τ₁), (τ,τ₂)]
         | .arr τ₁ τ₂, .arr σ₁ σ₂ => pure [(σ₁, τ₁), (τ₂, σ₂)]
         | .bool, .bool | .int, .int => pure []
+        -- Width subtyping: the record must provide every field that is demanded of it.
         | .rcd pos, .rcd neg => do{
               let pos' := pos.map_of_rcd;
               let neg' := neg.map_of_rcd;
-              let prod : Std.HashMap String Constraint ← pos'.foldM (fun rcd l  p ↦
+              let prod : Std.HashMap String Constraint ← neg'.foldM (fun rcd l n ↦
+              match pos'.get? l with
+                | .some p => pure <| rcd.insert l (p, n)
+                | .none => Except.error (CannotBiunify (.pos tpos) (.neg tneg))) {};
+              pure (prod.values)
+        }
+        -- Dually, every tag the sum may carry must be handled.
+        | .sum pos, .sum neg => do{
+              let pos' := pos.map_of_rcd;
+              let neg' := neg.map_of_rcd;
+              let prod : Std.HashMap String Constraint ← pos'.foldM (fun sum l p ↦
               match neg'.get? l with
-                | .some n => pure <| rcd.insert l (p, n)
+                | .some n => pure <| sum.insert l (p, n)
                 | .none => Except.error (CannotBiunify (.pos tpos) (.neg tneg))) {};
               pure (prod.values)
         }
@@ -122,6 +134,82 @@ partial def biunify (C : List Constraint) : M Bisubst :=
       biunify (cst ++ C);
     }
 
+/-- `π₁ ⊔⁻ π₂`: a join of negative types, defined only where it is again a negative type
+denoting exactly the union of the two: one side is `⊤`, the sides are equal, or both are
+sums (union the tags, join the payloads of shared ones). -/
+partial def negJoin : NType → NType → Option NType
+  | .top, _ | _, .top => some .top
+  | .sum f, .sum g => do
+      let merged ← f.toList.mapM fun (l, x) =>
+        match lookup g l with
+        | some y => (l, ·) <$> negJoin x y
+        | none => pure (l, x)
+      let extra := g.toList.filter fun (l, _) => (lookup f l).isNone
+      pure (.sum (fields_of_list (merged ++ extra)))
+  | π₁, π₂ => if π₁ == π₂ then some π₁ else none
+
+/-- The boolean literals matched by an or-tree of boolean literal patterns. -/
+def boolLits : Pat → Option (List Bool)
+  | .plbool b => some [b]
+  | .por p q => (· ++ ·) <$> boolLits p <*> boolLits q
+  | _ => none
+
+/-- Typing of an opened pattern: the negative type it demands of the scrutinee, the
+variables it binds, and whether every value of that type is known to match it. -/
+structure PatTyping where
+  ty : NType
+  bv : List String
+  total : Bool
+
+mutual
+/-- `Δ ⊢ p ⇒ π`.  Runs in the direction of `inferExpr`: from what the body demands (`Δ`)
+of the variables `p` binds to what `p` demands of the scrutinee, so no biunification is
+needed.  Literals type as their base type but are not total: without singleton types,
+only an or-tree covering `bool` is. -/
+def inferPat (Δ : MonoEnv) (p : Pat) : M PatTyping :=
+  match p with
+  | .pfvar x => pure ⟨Δ.getD x .top, [x], true⟩
+  | .pwild => pure ⟨.top, [], true⟩
+  | .plbool _ => pure ⟨.bool, [], false⟩
+  | .plint _ => pure ⟨.int, [], false⟩
+  | .prcd fs => inferPatFields Δ fs
+  | .pinj l q => do{
+      let t ← inferPat Δ q;
+      pure {t with ty := .sum (.cons l t.ty .nil)}
+  }
+  | .pand q r => do{
+      let t₁ ← inferPat Δ q;
+      let t₂ ← inferPat Δ r;
+      if t₁.bv.any t₂.bv.contains then Except.error (IllFormedPat p)
+      else pure ⟨mkMeet t₁.ty t₂.ty, t₁.bv ++ t₂.bv, t₁.total && t₂.total⟩
+  }
+  | .por q r =>
+      match boolLits p with
+        | .some bs => pure ⟨.bool, [], bs.contains true && bs.contains false⟩
+        | .none => do{
+            let t₁ ← inferPat Δ q;
+            let t₂ ← inferPat Δ r;
+            if !(t₁.bv.all t₂.bv.contains && t₂.bv.all t₁.bv.contains) then
+              Except.error (IllFormedPat p)
+            else match negJoin t₁.ty t₂.ty with
+              | .some π => pure ⟨π, t₁.bv, t₁.total && t₂.total⟩
+              | .none => Except.error (CannotJoin (.neg t₁.ty) (.neg t₂.ty))
+        }
+  -- `inferExpr` opens every slot before typing the pattern.
+  | .pbvar _ => Except.error Impossible
+def inferPatFields (Δ : MonoEnv) (fs : PatFields) : M PatTyping :=
+  match fs with
+  | .nil => pure ⟨.rcd .nil, [], true⟩
+  | .cons l q fs' => do{
+      let t ← inferPat Δ q;
+      let r ← inferPatFields Δ fs';
+      match r.ty with
+        | .rcd ts =>
+            if t.bv.any r.bv.contains then Except.error (IllFormedPat (.prcd fs))
+            else pure ⟨.rcd (.cons l t.ty ts), t.bv ++ r.bv, t.total && r.total⟩
+        | _ => Except.error Impossible
+  }
+end
 
 mutual
 
@@ -162,16 +250,16 @@ mutual
             pure ty
 
     }
-    | .lam _ e => do
-      let s ← mkFreshVar;
-      let e' := open_expr s e;
-      let (Δ, τ') ← inferExpr e';
-      match Δ.get? s with
-        | .none =>
-            let a ← mkFreshId;
-            pure (Δ, .arr (.var a) τ')
-        | .some τ =>
-            pure (Δ.erase s, .arr τ τ')
+    | .lam p e => do{
+      let xs ← (List.range p.arity).mapM (fun _ ↦ mkFreshVar);
+      let (Δ, τ) ← inferExpr (open_expr_slots 0 xs e);
+      let t ← inferPat Δ (open_pat_slots 0 xs p);
+      -- A pattern lambda has no fallthrough: it must bind every slot and match every
+      -- value of the type it demands.
+      if !(xs.all t.bv.contains) then Except.error (IllFormedPat p)
+      else if !t.total then Except.error (RefutablePat p)
+      else pure (xs.foldl Std.HashMap.erase Δ, .arr t.ty τ)
+    }
     | .app e₁ e₂ => do{
       let (Δ₁, τ₁) ← inferExpr e₁;
       let (Δ₂, τ₂) ← inferExpr e₂;
@@ -220,6 +308,12 @@ mutual
         pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
       }
     | .rcd f => inferRcd f
+    | .inj l e => do{
+      let (Δ, τ) ← inferExpr e;
+      let α ← mkFreshId;
+      let ξ ← biunify [(τ, .sum (.cons l (.var α) .nil))];
+      pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α));
+    }
     | .fix _ e => do{
 
       let s ← mkFreshVar;
@@ -240,6 +334,7 @@ mutual
       all_goals first
         | omega
         | (rw [opening_preserves_size']; omega)
+        | (rw [opening_slots_preserves_size]; omega)
   def inferRcd : Fields → M Typing
     | .nil => pure ({}, .rcd .nil)
     | .cons l e fs => do{
@@ -260,25 +355,4 @@ def infer (e : Exp) : M Typing := do
   let t ← inferExpr e
   pure t
 
-#eval (inferExpr (.fix "g" (.lam "x" (.add (.app (.bvar 1) (.lint 2)) (.app (.bvar 1) (.lbool False)))))).run
-#eval (inferExpr (.fix "f" (.lam "x" (.bvar 1)))).run
-
-#eval (inferExpr ((.lam "g" (.lam "h1" (.lam "y" (.ifc (.lbool False) (.bvar 0) (.app (.bvar 2) (.app (.bvar 3) (.app (.bvar 2) (.app (.bvar 1) (.app (.bvar 3) (.app (.bvar 1) (.app (.bvar 2) (.bvar 0)))))))))))))).run
-
-#eval (inferExpr (.fix "x" (.app (.bvar 0) (.bvar 0)))).run
-#eval (inferExpr (.app (.fvar "f") (.fvar "f"))).run
-#eval (inferExpr (.add (.fvar "x") (.fvar "y"))).run
-
-#eval (inferExpr (.fix "f" (.lam "g" (.lam "y" (.ifc (.lbool False) (.bvar 0) (.app (.bvar 1) (.app (.bvar 2) (.app (.bvar 1) (.bvar 0))))))))).run
--- FIxpoint combinator
-#eval (inferExpr (.lam "f"
-  (.app (.lam "x" (.app (.bvar 1) (.lam "v" (.app (.app (.bvar 1) (.bvar 1)) (.bvar 0)))))
-              (.lam "x" (.app (.bvar 1) (.lam "v" (.app (.app (.bvar 1) (.bvar 1)) (.bvar 0)))))))).run
-
-#eval (inferExpr (.lam "x" (.ifc (.proj (.bvar 0) "p") (.proj (.bvar 0) "q") (.proj (.bvar 0) "q")))).run
-#eval (inferExpr (.fix "f" (.lam "x" (.bvar 0)))).run
-#eval open_expr "f" (.lam "x" (.bvar 0))
-#eval (inferExpr (.fix "f" (.lam "x" (.app (.lam "y" (.lbool True)) (.not (.app (.bvar 1) (.lbool False))))))).run
-
-#eval (inferExpr (.fix "f" (.lam "g" (.lam "y" (.ifc (.lbool False) (.bvar 0) (.app (.bvar 1) (.app (.bvar 2) (.app (.bvar 1) (.bvar 0))))))))).run
 end TypeChecker

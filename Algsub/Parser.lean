@@ -27,9 +27,18 @@ Three constraints shaped the grammar:
   resolved in the elaborator rather than by the `.` rule, which is left to
   handle compound receivers such as `(fun x -> x).f`.
 
+Patterns (`algpat`) appear wherever a binder does: `fun p₁ … pₙ -> e`,
+`let p = e in b`, the parameters of `let rec`, and the clauses of
+`match e with | p₁ -> b₁ | …`.  Every clause starts with `|`; a clause body
+extends as far as it can, so a `match` nested in a body that is not the last
+must be parenthesized.  A `let` whose pattern is a
+bare variable stays a polymorphic `Exp.letE`; any other is sugar for
+`(fun p -> b) e`, hence monomorphic.  Tags are written `` `l ``, which lexes as
+a name literal, so like `_`, `&` and `|` it reserves no new token.
+
 `Exp.seq` has deliberately no concrete syntax: `TypeChecker.inferExpr` has no
-rule for it, and `open_expr_at` currently opens its second argument at `k + 1`
-even though `seq` binds nothing, so a parsed `seq` would not survive opening.
+rule for it.  Nor, yet, for `Exp.case`, so `#typecheck` reports `Impossible`
+for a `match`.
 -/
 
 namespace Algsub
@@ -39,9 +48,16 @@ open Lean Elab Term
 /-! ## Grammar -/
 
 declare_syntax_cat algsub (behavior := symbol)
+/-- With `symbol` behavior, leading `"true"`/`"false"` match identifiers instead of
+becoming tokens, which would stop them parsing as Lean terms. -/
+declare_syntax_cat algpat (behavior := symbol)
 
 /-- A record field `l = e`. -/
 syntax algsubField := ident " = " algsub
+/-- A record pattern field `l = p`. -/
+syntax algpatField := ident " = " algpat
+/-- A match clause `| p -> e`. -/
+syntax algsubClause := " | " algpat " -> " algsub
 
 syntax:max ident : algsub
 syntax:max num : algsub
@@ -52,6 +68,8 @@ syntax:max "{" algsubField,* "}" : algsub
 syntax:max "(" algsub ")" : algsub
 /-- Escape hatch: splice a Lean-level `Exp` value into surface syntax. -/
 syntax:max "~" term:max : algsub
+/-- A tag `` `l ``: applied, it injects its argument; bare, it carries `{}`. -/
+syntax:max name : algsub
 
 syntax:1023 algsub:1023 "." ident : algsub          -- projection
 syntax:1022 algsub:1022 algsub:1023 : algsub        -- application, left assoc
@@ -62,11 +80,25 @@ syntax:65 algsub:65 " + " algsub:66 : algsub
 syntax:35 algsub:36 " && " algsub:35 : algsub
 syntax:30 algsub:31 " || " algsub:30 : algsub
 
-syntax:5 "fun" ident+ " -> " algsub:5 : algsub
+syntax:5 "fun" algpat:max+ " -> " algsub:5 : algsub
 syntax:5 "if" algsub " then " algsub " else " algsub:5 : algsub
-syntax:5 "let" ident " = " algsub " in " algsub:5 : algsub
-syntax:5 "let" &"rec" ident ident* " = " algsub " in " algsub:5 : algsub
+syntax:5 "let" algpat " = " algsub " in " algsub:5 : algsub
+syntax:5 "let" &"rec" ident algpat:max* " = " algsub " in " algsub:5 : algsub
 syntax:5 &"fix" ident " => " algsub:5 : algsub
+syntax:5 "match" algsub " with" algsubClause+ : algsub
+
+syntax:max ident : algpat
+syntax:max "_" : algpat
+syntax:max num : algpat
+syntax:max "-" num : algpat
+syntax:max "true" : algpat
+syntax:max "false" : algpat
+syntax:max "{" algpatField,* "}" : algpat
+syntax:max "(" algpat ")" : algpat
+syntax:max name : algpat                            -- `l, matching `l {}
+syntax:100 name algpat:max : algpat                 -- `l p
+syntax:35 algpat:36 " & " algpat:35 : algpat
+syntax:30 algpat:31 " | " algpat:30 : algpat
 
 /-- Entry point: `[alg| e]` is the `Exp` denoted by the surface term `e`. -/
 syntax:max "[alg| " algsub "]" : term
@@ -96,14 +128,14 @@ private def strLit (s : String) : Term := Syntax.mkStrLit s
 
 /-- `Exp` for a primitive appearing in a non-saturated position. -/
 def etaPrim : String → MacroM Term
-  | "succ"   => `(Exp.lam "n" (Exp.succ (Exp.bvar 0)))
-  | "pred"   => `(Exp.lam "n" (Exp.pred (Exp.bvar 0)))
-  | "iszero" => `(Exp.lam "n" (Exp.iszero (Exp.bvar 0)))
-  | "not"    => `(Exp.lam "b" (Exp.not (Exp.bvar 0)))
-  | "add"    => `(Exp.lam "x" (Exp.lam "y" (Exp.add (Exp.bvar 1) (Exp.bvar 0))))
-  | "mul"    => `(Exp.lam "x" (Exp.lam "y" (Exp.mul (Exp.bvar 1) (Exp.bvar 0))))
-  | "and"    => `(Exp.lam "x" (Exp.lam "y" (Exp.and (Exp.bvar 1) (Exp.bvar 0))))
-  | "or"     => `(Exp.lam "x" (Exp.lam "y" (Exp.or (Exp.bvar 1) (Exp.bvar 0))))
+  | "succ"   => `(Exp.lam (Pat.pbvar 0) (Exp.succ (Exp.bvar 0)))
+  | "pred"   => `(Exp.lam (Pat.pbvar 0) (Exp.pred (Exp.bvar 0)))
+  | "iszero" => `(Exp.lam (Pat.pbvar 0) (Exp.iszero (Exp.bvar 0)))
+  | "not"    => `(Exp.lam (Pat.pbvar 0) (Exp.not (Exp.bvar 0)))
+  | "add"    => `(Exp.lam (Pat.pbvar 0) (Exp.lam (Pat.pbvar 0) (Exp.add (Exp.bvar 1) (Exp.bvar 0))))
+  | "mul"    => `(Exp.lam (Pat.pbvar 0) (Exp.lam (Pat.pbvar 0) (Exp.mul (Exp.bvar 1) (Exp.bvar 0))))
+  | "and"    => `(Exp.lam (Pat.pbvar 0) (Exp.lam (Pat.pbvar 0) (Exp.and (Exp.bvar 1) (Exp.bvar 0))))
+  | "or"     => `(Exp.lam (Pat.pbvar 0) (Exp.lam (Pat.pbvar 0) (Exp.or (Exp.bvar 1) (Exp.bvar 0))))
   | c        => `(Exp.const $(strLit c))
 
 /-- Resolve one identifier.  A dotted identifier `r.a.b` becomes a projection
@@ -120,6 +152,59 @@ def translateIdent (ctx : Ctx) (id : Ident) : MacroM Term := do
         else `(Exp.fvar $(strLit base))
     labels.foldlM (fun e l => `(Exp.proj $e $(strLit l))) hd
 
+/-! ## Patterns
+
+The `i`-th distinct variable of a pattern, left to right, is slot `i`, referred
+to by `bvar i` in the body.  Slots are assigned by name, so both sides of `|`
+bind the same slots in whatever order they mention them; a variable repeated
+under `&` or across record fields shares one slot, which
+`TypeChecker.inferPat` rejects as ill-formed. -/
+
+private def tagName (l : TSyntax `name) : String := l.getName.toString (escape := false)
+
+/-- The variables of a pattern in slot order, appended to `acc`. -/
+partial def patVars (acc : Array String) (stx : TSyntax `algpat) : Array String :=
+  match stx with
+  | `(algpat| $x:ident) =>
+      let n := x.getId.toString
+      if acc.contains n then acc else acc.push n
+  | `(algpat| ($p)) | `(algpat| $_:name $p) => patVars acc p
+  | `(algpat| $p & $q) | `(algpat| $p | $q) => patVars (patVars acc p) q
+  | `(algpat| { $fs,* }) =>
+      fs.getElems.foldl (fun acc f =>
+        match f with
+        | `(algpatField| $_:ident = $p) => patVars acc p
+        | _ => acc) acc
+  | _ => acc
+
+/-- Translate a pattern whose variables, in slot order, are `vars`. -/
+partial def translatePat (vars : Array String) (stx : TSyntax `algpat) : MacroM Term := do
+  match stx with
+  | `(algpat| ($p))   => translatePat vars p
+  | `(algpat| $x:ident) =>
+      unless x.getId.isAtomic do Macro.throwErrorAt x "pattern variables cannot be dotted"
+      match vars.findIdx? (· == x.getId.toString) with
+      | some i => `(Pat.pbvar $(Syntax.mkNatLit i))
+      | none   => Macro.throwErrorAt x "unexpected pattern variable"
+  | `(algpat| _)      => `(Pat.pwild)
+  | `(algpat| true)   => `(Pat.plbool true)
+  | `(algpat| false)  => `(Pat.plbool false)
+  | `(algpat| $n:num) => `(Pat.plint $(Syntax.mkNatLit n.getNat))
+  | `(algpat| -$n:num) => `(Pat.plint (-$(Syntax.mkNatLit n.getNat)))
+  | `(algpat| $l:name) => `(Pat.pinj $(strLit (tagName l)) (Pat.prcd PatFields.nil))
+  | `(algpat| $l:name $p) => `(Pat.pinj $(strLit (tagName l)) $(← translatePat vars p))
+  | `(algpat| $p & $q) => `(Pat.pand $(← translatePat vars p) $(← translatePat vars q))
+  | `(algpat| $p | $q) => `(Pat.por $(← translatePat vars p) $(← translatePat vars q))
+  | `(algpat| { $fs,* }) => do
+      let mut out ← `(PatFields.nil)
+      for f in fs.getElems.reverse do
+        match f with
+        | `(algpatField| $l:ident = $p) =>
+            out ← `(PatFields.cons $(strLit l.getId.toString) $(← translatePat vars p) $out)
+        | _ => Macro.throwErrorAt f "ill-formed record pattern field"
+      `(Pat.prcd $out)
+  | _ => Macro.throwErrorAt stx "unsupported pattern"
+
 mutual
 
 /-- Flatten an application spine into its head and its arguments, in order. -/
@@ -134,6 +219,7 @@ partial def translate (ctx : Ctx) (stx : TSyntax `algsub) : MacroM Term := do
   | `(algsub| ($e))          => translate ctx e
   | `(algsub| ~$e:term)      => pure e
   | `(algsub| $x:ident)      => translateIdent ctx x
+  | `(algsub| $l:name)       => `(Exp.inj $(strLit (tagName l)) (Exp.rcd Fields.nil))
   | `(algsub| true)          => `(Exp.lbool true)
   | `(algsub| false)         => `(Exp.lbool false)
   | `(algsub| $n:num)        => `(Exp.lint $(Syntax.mkNatLit n.getNat))
@@ -149,20 +235,26 @@ partial def translate (ctx : Ctx) (stx : TSyntax `algsub) : MacroM Term := do
       `(Exp.fix $(strLit n) $(← translate (n :: ctx) b))
   | `(algsub| if $c then $t else $f) =>
       `(Exp.ifc $(← translate ctx c) $(← translate ctx t) $(← translate ctx f))
-  | `(algsub| fun $xs:ident* -> $b) => do
-      let names := xs.map (·.getId.toString)
-      let body ← translate (names.toList.reverse ++ ctx) b
-      names.foldrM (fun x e => `(Exp.lam $(strLit x) $e)) body
-  | `(algsub| let $x:ident = $v in $b) => do
-      let n := x.getId.toString
-      `(Exp.letE $(strLit n) $(← translate ctx v) $(← translate (n :: ctx) b))
-  | `(algsub| let rec $f:ident $xs:ident* = $v in $b) => do
+  | `(algsub| fun $ps:algpat* -> $b) => translateFun ctx ps b
+  | `(algsub| let $p:algpat = $v in $b) => do
+      if let `(algpat| $x:ident) := p then
+        let n := x.getId.toString
+        `(Exp.letE $(strLit n) $(← translate ctx v) $(← translate (n :: ctx) b))
+      else
+        `(Exp.app $(← translateFun ctx #[p] b) $(← translate ctx v))
+  | `(algsub| let rec $f:ident $ps:algpat* = $v in $b) => do
       let fn := f.getId.toString
-      let names := xs.map (·.getId.toString)
-      let inner ← translate (names.toList.reverse ++ [fn] ++ ctx) v
-      let lams ← names.foldrM (fun x e => `(Exp.lam $(strLit x) $e)) inner
-      `(Exp.letE $(strLit fn) (Exp.fix $(strLit fn) $lams)
+      `(Exp.letE $(strLit fn) (Exp.fix $(strLit fn) $(← translateFun (fn :: ctx) ps v))
           $(← translate (fn :: ctx) b))
+  | `(algsub| match $e with $cs:algsubClause*) => do
+      let mut out ← `(Clauses.nil)
+      for c in cs.reverse do
+        match c with
+        | `(algsubClause| | $p -> $b) =>
+            let vars := patVars #[] p
+            out ← `(Clauses.cons $(← translatePat vars p) $(← translate (vars.toList ++ ctx) b) $out)
+        | _ => Macro.throwErrorAt c "ill-formed match clause"
+      `(Exp.case $(← translate ctx e) $out)
   | `(algsub| { $fs,* }) => do
       let mut out ← `(Fields.nil)
       for f in fs.getElems.reverse do
@@ -173,10 +265,21 @@ partial def translate (ctx : Ctx) (stx : TSyntax `algsub) : MacroM Term := do
       `(Exp.rcd $out)
   | _ => translateApp ctx stx
 
-/-- Application, with primitive heads folded into their `Exp` nodes. -/
+/-- `fun p₁ … pₙ -> b`: nested pattern lambdas, the body seeing the variables of
+the innermost pattern first.  With no patterns, just `b`. -/
+partial def translateFun (ctx : Ctx) (ps : Array (TSyntax `algpat)) (b : TSyntax `algsub) :
+    MacroM Term := do
+  let varss := ps.map (patVars #[])
+  let body ← translate (varss.foldl (fun ctx vs => vs.toList ++ ctx) ctx) b
+  (ps.zip varss).foldrM (fun (p, vs) e => do `(Exp.lam $(← translatePat vs p) $e)) body
+
+/-- Application, with primitive and tag heads folded into their `Exp` nodes. -/
 partial def translateApp (ctx : Ctx) (stx : TSyntax `algsub) : MacroM Term := do
   let (args, hd) := spine stx
   if args.isEmpty then Macro.throwErrorAt stx "unsupported syntax"
+  if let `(algsub| $l:name) := hd then
+    let inj ← `(Exp.inj $(strLit (tagName l)) $(← translate ctx args[0]!))
+    return ← (args[1:].toArray).foldlM (fun e a => do `(Exp.app $e $(← translate ctx a))) inj
   if let `(algsub| $f:ident) := hd then
     let name := f.getId.toString
     if (ctx.index? name).isNone then
@@ -207,7 +310,7 @@ end Parser
 
 macro_rules | `([alg| $e:algsub]) => Parser.translate [] e
 
-/-- `#alg e` infers a typing for the surface term `e`. -/
+/-- `#typecheck e` infers a typing for the surface term `e`. -/
 syntax (name := algCmd) "#typecheck " algsub : command
 
 elab_rules : command
@@ -236,7 +339,15 @@ elab_rules : command
 #typecheck fix g => fun x -> g 2 + g false
 #typecheck fix x => (fun y -> fun z -> z) (x x)
 #typecheck let f = fun x -> x in f f
-#typecheck fun f -> (fun x -> f (fun v -> x x v))(fun x -> f(fun v ->x x v))
+#typecheck (fun f -> (fun x -> f (fun v -> (x x) v)) (fun x -> f (fun v -> (x x) v)))
 #typecheck let rec f = fun x -> {l = x, r = f x} in f
-#typecheck fun x -> let x = x in x x
+
+#typecheck fun {a = x, b = y} -> x + y
+#typecheck fun (r & {p = b}) -> if b then r.q else 0
+#typecheck fun (`a x | `b x) -> x + 1
+#typecheck fun (`some _ | `none) (true | false) -> 1
+#typecheck let {x = a, y = b} = {x = 1, y = true} in if b then a else 0
+#typecheck (fun (`a x | `b x) -> x + 1) (`a 3)
+#eval [alg| let rec len l = match l with | `nil -> 0 | `cons {tl = t} -> 1 + len t in len]
+
 end Algsub
