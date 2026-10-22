@@ -108,11 +108,16 @@ def Ty.Repr : Ty → String
   | .neg τ => τ.Repr
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 instance : Repr PType := {reprPrec := fun t _ ↦ t.Repr}
 =======
 instance : Repr PType := {reprPrec := fun t prec ↦ t.Repr}
 >>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
 instance : Repr NType := {reprPrec := fun t prec ↦ t.Repr}
+=======
+instance : Repr PType := {reprPrec := fun t _ ↦ t.Repr}
+instance : Repr NType := {reprPrec := fun t _ ↦ t.Repr}
+>>>>>>> 12ea802 (Add automata encoding)
 instance : Repr Ty := {reprPrec := fun t _ ↦ t.Repr }
 
 abbrev MonoEnv := Std.HashMap String NType
@@ -321,7 +326,8 @@ mutual
 @[simp]
 def Exp.size : Exp → ℕ
   | .bvar _ | .fvar _ | .lbool _ | .lint _ | .const _ => 1
-  | .app e1 e2 | .seq e1 e2  | .add e1 e2 | .mul e1 e2  | .and e1 e2 | .or e1 e2  => 1 + e1.size + e2.size
+  | .app e1 e2 | .seq e1 e2  | .add e1 e2 | .mul e1 e2  | .and e1 e2 | .or e1 e2
+      => 1 + e1.size + e2.size
   | .lam _ e | .fix _ e| .iszero e | .pred e | .succ e   | .not e   => 1 + e.size
   | .ifc e1 e2 e3   => 1 + e1.size + e2.size + e3.size
   | .letE _ e1 e2   => 1 + e1.size + e2.size
@@ -609,7 +615,7 @@ theorem Exp.induct
   (ind_let : ∀ x e1 e2, motive e1 → motive e2 → motive (.letE x e1 e2))
   (ind_cons : ∀ x e fs, motive e → motive (.rcd fs) → motive (.rcd (.cons x e fs)))
   (ind_proj : ∀ e x, motive e → motive (.proj e x))
-  (ind_succ : ∀e, motive e → motive (.succ e))
+  (ind_succ : ∀ e, motive e → motive (.succ e))
   (ind_pred : ∀ e, motive e → motive (.pred e))
   (ind_iszero : ∀ e, motive e → motive (.iszero e))
   (ind_add : ∀ e1 e2, motive e1 → motive e2 → motive (.add e1 e2))
@@ -641,7 +647,8 @@ theorem PType.induct
   (base_nil : motive (.pos (.rcd .nil)))
   (ind_arr : ∀ τ₁ τ₂, motive (.neg τ₁) → motive (.pos τ₂) → motive (.pos (.arr τ₁ τ₂)))
   (ind_join : ∀ τ₁ τ₂, motive (.pos τ₁) → motive (.pos τ₂) → motive (.pos (.join τ₁ τ₂)))
-  (ind_rcd : ∀ x τ τ', motive (.pos τ) → motive (.pos (.rcd τ')) → motive (.pos (.rcd (.cons x τ τ'))))
+  (ind_rcd : ∀ x τ τ', motive (.pos τ) → motive (.pos (.rcd τ'))
+    → motive (.pos (.rcd (.cons x τ τ'))))
   (ind_fix : ∀n τ, motive (.pos τ) → motive (.pos (.fix n τ)))
   (τ : PType) : motive (.pos τ) := sorry
  /--  PType.rec
