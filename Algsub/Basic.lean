@@ -107,7 +107,11 @@ def Ty.Repr : Ty → String
   | .pos τ => τ.Repr
   | .neg τ => τ.Repr
 
+<<<<<<< HEAD
 instance : Repr PType := {reprPrec := fun t _ ↦ t.Repr}
+=======
+instance : Repr PType := {reprPrec := fun t prec ↦ t.Repr}
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
 instance : Repr NType := {reprPrec := fun t prec ↦ t.Repr}
 instance : Repr Ty := {reprPrec := fun t _ ↦ t.Repr }
 
@@ -705,6 +709,7 @@ def open_expr x e := open_expr_at 0 x e
 
 theorem opening_preserves_size' : ∀ x e, (open_expr x e).size = e.size := by
   apply opening_preserves_size
+<<<<<<< HEAD
 
 namespace Types
 inductive Polarity | pos | neg
@@ -729,3 +734,5 @@ inductive TypeLat (α : Type) where
   | LZero | LUnexpanded 
 
 end Types
+=======
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)

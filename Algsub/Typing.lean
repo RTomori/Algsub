@@ -2,7 +2,10 @@ import Mathlib.Tactic
 import Std.Data.HashMap
 import Std.Data.HashSet
 import Algsub.Basic
+<<<<<<< HEAD
 
+=======
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
 open Lean hiding Environment Exception
 open Meta
 
@@ -12,8 +15,22 @@ structure TypeChecker.State where
   seen : Std.HashSet Constraint := {}
   lparams : Environment := {}
 
+<<<<<<< HEAD
 structure TypeChecker.Context where
   env : Environment := {}
+=======
+abbrev Symbol := String
+inductive Variance
+  | VPos | VNeg | VNegPos | None
+  deriving BEq, Repr
+structure TyCtx where
+  next : Nat := 1
+  decls : Std.HashMap ℕ (Symbol × Array Variance) := {}
+  byName : Std.HashMap Symbol ℕ := {}
+
+structure TypeChecker.Context where
+  env : TyCtx := {}
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
   lctx : Environment := {}
 
 namespace TypeChecker
@@ -26,7 +43,12 @@ def getPolyCtx : M Environment := return (← read).lctx
 
 def getParams : M Environment := return (← get).lparams
 
+<<<<<<< HEAD
 def extendPolyCtx (x : String) (t : Typing) : M α → M α := ReaderT.adapt (fun c ↦ {lctx := c.lctx.insert x t})
+=======
+def extendPolyCtx (x : String) (t : Typing) : M α → M α :=
+  ReaderT.adapt (fun c ↦ {lctx := c.lctx.insert x t})
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
 
 def mkFreshId : M ℕ := do{
   let s ← get;
@@ -53,6 +75,7 @@ def atomic (c : Constraint) : Bool :=
                             | _, _ => false
 
 
+<<<<<<< HEAD
 /-- Perhaps sound? since ξ(.var n) = .var n is by no means a subtype of τ, where τ constructed.
 -/
 def bisubst_of_atomic (c : Constraint) : M Bisubst :=
@@ -60,6 +83,12 @@ def bisubst_of_atomic (c : Constraint) : M Bisubst :=
     |(.var n, .var m) => pure [n ↦ .meet (.var n) (.var m) ⁻]
       --if n < m then pure [n ↦ .meet (.var n) (.var m) ⁻]
         --      else if m < n then pure [m ↦ .join (.var n) (.var m)⁺] else pure emptyBisubst
+=======
+def bisubst_of_atomic (c : Constraint) : M Bisubst :=
+  match c with
+    |(.var n, .var m) => if n < m then pure [n ↦ .meet (.var n) (.var m) ⁻]
+              else if m < n then pure [m ↦ .join (.var n) (.var m)⁺] else pure emptyBisubst
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
     |(.var n, τ) =>
       if not (isftv_neg n τ) then pure [n ↦ .meet (.var n) τ ⁻]
       else Except.error <| CannotBiunify (.pos (.var n)) (.neg τ)
@@ -78,7 +107,14 @@ def subi : Constraint →  M (List Constraint)
         | .rcd pos, .rcd neg => do{
               let pos' := pos.map_of_rcd;
               let neg' := neg.map_of_rcd;
+<<<<<<< HEAD
               let prod : Std.HashMap String Constraint := pos'.map (fun l τ ↦ (τ, neg'.get! l)) ;
+=======
+              let prod : Std.HashMap String Constraint ← pos'.foldM (fun rcd l  p ↦
+              match neg'.get? l with
+                | .some n => pure <| rcd.insert l (p, n)
+                | .none => Except.error (CannotBiunify (.pos tpos) (.neg tneg))) {};
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
               pure (prod.values)
         }
         | .fix n τ, τ' => pure [(apply_pos [n↦.fix n τ⁺] τ, τ')]
@@ -91,6 +127,7 @@ def HashSet.map
   [BEq α] [Hashable α] [BEq β] [Hashable β] (s : Std.HashSet α)
   (f : α → β) : Std.HashSet β :=   s.fold (fun acc x => acc.insert (f x)) ∅
 
+<<<<<<< HEAD
 /--
 #### Proof that Bisubsitution Cannot Solve the Atomic Constraint
 
@@ -98,6 +135,8 @@ def HashSet.map
 A counterexample:
 
 -/
+=======
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
 partial def biunify (C : List Constraint) : M Bisubst :=
   match C with
     | [] => pure emptyBisubst
@@ -122,6 +161,7 @@ partial def biunify (C : List Constraint) : M Bisubst :=
 
 
 mutual
+<<<<<<< HEAD
  /--
  # How to type recursive terms?
  * 次の主張は成り立つだろうか?
@@ -143,21 +183,39 @@ mutual
       let ξ ← biunify [(τ₀, .var α)];
       pure ((meet_env env Δ₀).map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
       } -/
+=======
+
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
   def inferExpr : (e : Exp) → M Typing
     | Exp.lbool _ => pure ({}, .bool)
     | Exp.lint _ => pure ({}, .int)
     | Exp.succ e | Exp.pred e => do{
       let (Δ, τ) ← inferExpr e;
+<<<<<<< HEAD
       let α ← mkFreshId;
+=======
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
       let ξ ← biunify [(τ, .int)];
       pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), .int)
     }
     | Exp.iszero e => do{
       let (Δ, τ) ← inferExpr e;
+<<<<<<< HEAD
       let α ← mkFreshId;
       let ξ ← biunify [(τ, .int)];
       pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), .bool)
     }
+=======
+      let ξ ← biunify [(τ, .int)];
+      pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), .bool)
+    }
+    | Exp.not e => do{
+      let (Δ, τ) ← inferExpr e;
+      let α ← mkFreshId;
+      let ξ ← biunify [(τ, .bool), (.bool, (.var α))];
+      pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
+    }
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
     | .fvar x => do{
       let env ← getPolyCtx;
       match env.get? x with
@@ -173,7 +231,10 @@ mutual
           do
             let s ← mkFreshId;
             let ty := (Std.HashMap.emptyWithCapacity.insert x (.var s), .var s);
+<<<<<<< HEAD
             --modify (fun s => {lparams := params.insert x ty});
+=======
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
             pure ty
 
     }
@@ -203,6 +264,17 @@ mutual
       let Δ := meet_env Δ₁ Δ₂;
       pure (Δ.map (fun _ τ ↦ apply_neg ξ τ),  apply_pos ξ (.var α))
     }
+<<<<<<< HEAD
+=======
+    | .and e₁ e₂ | .or e₁ e₂ => do{
+      let (Δ₁, τ₁) ← inferExpr e₁;
+      let (Δ₂, τ₂) ← inferExpr e₂;
+      let α ← mkFreshId;
+      let ξ ← biunify [(.arr .bool (.arr .bool .bool), .arr τ₁ (.arr τ₂ (.var α)))];
+      let Δ := meet_env Δ₁ Δ₂;
+      pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
+    }
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
     | .ifc e1 e2 e3 => do{
         let (Δ₁, τ₁) ← inferExpr e1;
         let (Δ₂, τ₂) ← inferExpr e2;
@@ -227,14 +299,23 @@ mutual
         pure (Δ.map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ (.var α))
       }
     | .rcd f => inferRcd f
+<<<<<<< HEAD
     | .fix f e => do{
       -- A typing rule mimicking Hindley-Milner
+=======
+    | .fix _ e => do{
+
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
       let s ← mkFreshVar;
       let e' := open_expr s e;
       let (Δ, τ) ← inferExpr e';
       match Δ.get? s with
         | .none => Except.error Impossible
         | .some τ' => do{
+<<<<<<< HEAD
+=======
+
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
           let ξ ← biunify [(τ, τ')];
           pure ((Δ.erase s).map (fun _ τ ↦ apply_neg ξ τ), apply_pos ξ τ)
         }
@@ -283,4 +364,11 @@ def infer (e : Exp) : M Typing := do
 
 #eval (inferExpr (.lam "x" (.ifc (.proj (.bvar 0) "p") (.proj (.bvar 0) "q") (.proj (.bvar 0) "q")))).run
 #eval (inferExpr (.fix "f" (.lam "x" (.bvar 0)))).run
+<<<<<<< HEAD
+=======
+#eval open_expr "f" (.lam "x" (.bvar 0))
+#eval (inferExpr (.fix "f" (.lam "x" (.app (.lam "y" (.lbool True)) (.not (.app (.bvar 1) (.lbool False))))))).run
+
+#eval (inferExpr (.fix "f" (.lam "g" (.lam "y" (.ifc (.lbool False) (.bvar 0) (.app (.bvar 1) (.app (.bvar 2) (.app (.bvar 1) (.bvar 0))))))))).run
+>>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
 end TypeChecker
