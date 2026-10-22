@@ -234,9 +234,13 @@ elab_rules : command
 
 #typecheck fun x -> if x.p then x.q else x.q
 #typecheck fix g => fun x -> g 2 + g false
-#typecheck fix x => (fun y -> fun z -> z) (x x)
+
+
+
 #typecheck let f = fun x -> x in f f
+
 #typecheck fun f -> (fun x -> f (fun v -> x x v))(fun x -> f(fun v ->x x v))
+
 #typecheck let rec f = fun x -> {l = x, r = f x} in f
 #typecheck fun x -> let x = x in x x
 end Algsub
