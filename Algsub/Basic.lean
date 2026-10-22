@@ -1,0 +1,707 @@
+import Mathlib.Tactic
+import Mathlib.Control.Traversable.Basic
+import Std.Data.TreeMap
+import Std.Data.HashSet
+mutual
+  inductive Exp : Type where
+  /-- Fixme : translate to locally nameless -/
+    | bvar : ℕ → Exp
+    | fvar : String → Exp
+    | const : String → Exp
+    | app : Exp → Exp → Exp
+    | lbool : Bool → Exp
+    | lint : Int → Exp
+    | lam : String → Exp → Exp
+    | fix : String → Exp → Exp
+    | rcd : Fields → Exp
+    | ifc : Exp → Exp → Exp → Exp
+    | letE : String → Exp → Exp → Exp
+    | seq : Exp → Exp → Exp
+    | succ : Exp → Exp
+    | pred : Exp → Exp
+    | iszero : Exp → Exp
+    | add : Exp → Exp → Exp
+    | mul : Exp → Exp → Exp
+    | not : Exp → Exp
+    | and : Exp → Exp → Exp
+    | or : Exp → Exp → Exp
+    | proj : Exp → String → Exp
+    deriving BEq, Repr
+  inductive Fields : Type where
+    | nil : Fields
+    | cons : String → Exp → Fields → Fields
+    deriving BEq, Repr
+end
+
+/- Types are classified w.r.t. their polarities. Neutral types (logical variables, constants)
+are regarded as type with both polarities -/
+inductive TyField (α : Type) : Type where
+  | nil : TyField α
+  | cons : String → α → TyField α → TyField α
+  deriving BEq, Hashable, DecidableEq, Inhabited
+
+
+mutual
+inductive Ty : Type where
+  | pos (p : PType)
+  | neg (p : NType)
+  deriving BEq, Hashable
+inductive PType : Type where
+  | bool : PType
+  | int : PType
+  | var : ℕ → PType
+  | arr : NType → PType → PType
+  | rcd : TyField PType → PType
+  | join : PType → PType → PType
+  | fix : ℕ → PType → PType
+  | bot : PType
+  deriving BEq, Hashable, Inhabited
+inductive NType : Type where
+  | bool : NType
+  | int : NType
+  | var : ℕ → NType
+  | arr : PType → NType → NType
+  | rcd : TyField NType → NType
+  | meet : NType → NType → NType
+  | top : NType
+  | fix : ℕ → NType → NType
+  deriving BEq, Hashable, Inhabited
+end
+def TyField.Repr [Repr α] : TyField α → String
+  | .nil => ""
+  | .cons l τ .nil => l ++ " : " ++ (repr τ).pretty
+  | .cons l τ flds => l ++ ":" ++ (repr τ).pretty ++ "," ++ flds.Repr
+
+mutual
+def PType.Repr : PType → String
+  | .bool => "bool"
+  | .fix n τ => "μ v" ++ n.repr ++ "." ++ τ.Repr
+  | .arr τ₁ τ₂ => τ₁.Repr ++ "→" ++ τ₂.Repr
+  | .bot => "⊥"
+  | .join τ₁ τ₂ => "(" ++ τ₁.Repr ++ "⊔" ++ τ₂.Repr ++ ")"
+  | .var n => "v" ++ n.repr
+  | .int => "ℤ"
+  | .rcd fld => "{" ++ posrcd_repr fld ++ "}"
+
+def posrcd_repr : TyField PType → String
+  | .nil => ""
+  | .cons l τ .nil => l ++ ":" ++ τ.Repr
+  | .cons l τ flds => l ++ ":" ++ τ.Repr ++ "," ++ posrcd_repr flds
+
+def NType.Repr : NType → String
+  | .bool => "bool"
+  | .int => "ℤ"
+  | .var n => "v" ++ n.repr
+  | .fix n τ => "μ " ++ n.repr ++ "." ++ τ.Repr
+  | .top => "⊤"
+  | .meet τ₁ τ₂ => "(" ++ τ₁.Repr ++ "⊓" ++ τ₂.Repr ++ ")"
+  | .arr τ₁ τ₂ => "(" ++ τ₁.Repr ++ "→" ++  τ₂.Repr ++ ")"
+  | .rcd fld => "{" ++ negrcd_repr fld ++ "}"
+
+def negrcd_repr : TyField NType → String
+  | .nil => ""
+  | .cons l τ .nil => l ++ ":" ++ τ.Repr
+  | .cons l τ flds => l ++ ":" ++ τ.Repr ++ "," ++ negrcd_repr flds
+end
+def Ty.Repr : Ty → String
+  | .pos τ => τ.Repr
+  | .neg τ => τ.Repr
+
+instance : Repr PType := {reprPrec := fun t prec ↦ t.Repr}
+instance : Repr NType := {reprPrec := fun t prec ↦ t.Repr}
+instance : Repr Ty := {reprPrec := fun t _ ↦ t.Repr }
+
+abbrev MonoEnv := Std.HashMap String NType
+abbrev Typing := MonoEnv × PType
+abbrev Environment := Std.HashMap String Typing
+
+abbrev Constraint := PType × NType
+
+inductive Exception where
+  | UnknownIdent (x : String)
+  | CannotInferArg (x : String)
+  | CannotBiunify (τ₁ τ₂ : Ty)
+  | Circular
+  | Impossible
+  | NameClash (x : String)
+  | TypeErr (e : Exp) (e : Exception)
+  deriving Repr
+
+deriving instance Hashable,BEq for Constraint
+
+
+def emptyEnv : Environment  := Std.HashMap.emptyWithCapacity
+
+def emptyMonoEnv : MonoEnv := Std.HashMap.emptyWithCapacity
+
+def fields_of_list (l : List (String × α)) : TyField α :=
+  match l with
+    | [] => .nil
+    | (l , τ) :: fs => .cons l τ (fields_of_list fs)
+
+def TyField.toList : TyField α → List (String × α)
+  | .nil => []
+  | .cons l x fs => (l, x) :: fs.toList
+def dom :  TyField α →  List String
+  | TyField.nil=> {}
+  | TyField.cons l _ ts => {l} ∪ dom ts
+
+def TyField.map_of_rcd : TyField α → Std.HashMap String α
+  | TyField.nil => Std.HashMap.emptyWithCapacity
+  | .cons l τ fls => fls.map_of_rcd.insert l τ
+def rcd_map (f : α → β) (rcd : TyField α) : TyField β :=
+  match rcd with
+    | .nil  => .nil
+    | .cons l x ts => .cons l (f x) (rcd_map f ts)
+
+def rcd_traverse {m : Type → Type} [Applicative m]
+  {α β : Type} (f : α → m β) : TyField α → m (TyField β)
+  | .nil => pure .nil
+  | .cons l x fs => (TyField.cons l) <$> f x <*> (rcd_traverse f fs)
+
+def lookup (f : TyField α) (name : String) : Option α :=
+  match f with
+    | .nil => .none
+    | .cons l x ts => if name = l then .some x else lookup ts name
+def Bisubst := Std.TreeMap ℕ (PType × NType)
+def Subst := Std.TreeMap ℕ Ty
+deriving instance Repr for Bisubst
+deriving instance Inhabited for Bisubst
+
+def emptyBisubst : Bisubst := Std.TreeMap.empty
+def emptySubst : Subst := Std.TreeMap.empty
+
+notation "[" n "↦" σ₁"⁺]" => emptyBisubst.insert n (σ₁, NType.var n)
+
+notation "[" n "↦" σ₂ "⁻]" => emptyBisubst.insert n (PType.var n, σ₂)
+
+notation "["n"↦" τ "]" => emptySubst.insert n τ
+notation "[" n "↦" "(" σ₁ "," σ₂ ")" "]"=> emptyBisubst.insert n (σ₁, σ₂)
+mutual
+def apply_pos (σ : Bisubst) : PType → PType
+ | .var n =>
+    match σ.get? n with
+      | .none => .var n
+      | .some (t1, _) => t1
+  | .bool => .bool
+  | .int => .int
+  | .bot => .bot
+  | .join t1 t2 => .join (apply_pos σ t1) (apply_pos σ t2)
+  | .arr t1 t2 => .arr (apply_neg σ t1) (apply_pos σ t2)
+  | .rcd fs => .rcd (apply_pos_rcd σ fs)
+  | .fix n τ => .fix n (apply_pos σ τ)
+def apply_neg (σ : Bisubst) : NType → NType
+  | .var n =>
+      match σ.get? n with
+        | .none => .var n
+        | .some (_, t2) => t2
+  | .bool => .bool
+  | .int => .int
+  | .top => .top
+  | .meet t1 t2 => .meet (apply_neg σ t1) (apply_neg σ t2)
+  | .arr t1 t2 => .arr (apply_pos σ t1) (apply_neg σ t2)
+  | .rcd fs => .rcd (apply_neg_rcd σ fs)
+  | .fix n τ   => .fix n (apply_neg σ τ)
+
+def apply_pos_rcd (σ : Bisubst) : TyField PType → TyField PType
+  | .nil => .nil
+  | .cons name t fs => .cons name (apply_pos σ t) (apply_pos_rcd σ fs)
+def apply_neg_rcd (σ : Bisubst) : TyField NType → TyField NType
+  | .nil => .nil
+  | .cons name t fs => .cons name (apply_neg σ t) (apply_neg_rcd σ fs)
+end
+
+def apply_to_cst (σ : Bisubst) (c : Constraint) : Constraint :=
+  match c with
+    | (τ₁, τ₂) => (apply_pos σ τ₁, apply_neg σ τ₂)
+
+def compose (σ₁ σ₂ : Bisubst) : Bisubst :=
+  -- (σ₁ ∘ σ₂): apply σ₁ to σ₂'s range, then union in σ₁'s own bindings.
+  -- The union is essential: dropping σ₁'s exclusive keys loses already-solved
+  -- constraints (mapped wins on shared keys, since those are σ₁ applied to σ₂).
+  let mapped := σ₂.map (fun _ (τ₁, τ₂) ↦ (apply_pos σ₁ τ₁, apply_neg σ₁ τ₂))
+  σ₁.mergeWith (fun _ _ m ↦ m) mapped
+
+-- Free variables in expressions
+mutual
+def fv : Exp → Finset String
+  | .bvar _ | .lint _ | .lbool _ | .const _ => {}
+  | .iszero t | .pred t | .succ t | .not t => fv t
+  | .mul e1 e2 | .add e1 e2 | .or e1 e2 | .and e1 e2=> fv e1 ∪ fv e2
+  | .fvar x => {x}
+  | .app t1 t2 => fv t1 ∪ fv t2
+  | .lam _ t => fv t
+  | .fix _  t => fv t
+  | .seq t1 t2 => fv t1 ∪ fv t2
+  | .ifc t1 t2 t3 => fv t1 ∪ fv t2 ∪ fv t3
+  | .rcd fs => fv_rcd fs
+  | .proj e _ => fv e
+  | .letE _ e1 e2 => fv e1 ∪ fv e2
+
+def fv_rcd : Fields → Finset String
+  | .nil => {}
+  | .cons _ e fs => fv e ∪ fv_rcd fs
+end
+mutual
+def isftv_pos (n : ℕ) : PType → Bool
+  | .var m => m == n
+  | .bot | .int | .bool  => false
+  | .join τ₁ τ₂ => isftv_pos n τ₁ || isftv_pos n τ₂
+  | .rcd f => isftv_posrcd n f
+  | .arr τ₁ τ₂ => isftv_neg n τ₁ || isftv_pos n τ₂
+  | .fix _ τ => isftv_pos n τ
+def isftv_neg (n : ℕ) : NType → Bool
+ | .var m => m == n
+ | .top | .int | .bool => false
+ | .meet τ₁ τ₂ => isftv_neg n τ₁ || isftv_neg n τ₂
+ | .rcd f => isftv_negrcd n f
+ | .arr τ₁ τ₂ => isftv_pos n τ₁ || isftv_neg n τ₂
+ | .fix _ τ => isftv_neg n τ
+
+def isftv_posrcd(n : ℕ) : TyField PType → Bool
+  | .nil => false
+  | .cons _ τ fs => isftv_pos n τ || isftv_posrcd n fs
+
+def isftv_negrcd (n : ℕ) : TyField NType → Bool
+  | .nil => false
+  | .cons _ τ fs => isftv_neg n τ || isftv_negrcd n fs
+end
+
+mutual
+def numBinders : Exp → ℕ
+  | .bvar _|.lbool _ | .lint _ | .fvar _ | .const _=> 0
+  | .lam _ e | .iszero e  => numBinders e + 1
+  | .letE _ e1 e2 => max (numBinders e2 + 1) (numBinders e1)
+  | .ifc e1 e2 e3 => max (max (numBinders e1) (numBinders e2)) (numBinders e3)
+  | .fix _ e => numBinders e + 1
+  | .app e1 e2=> max (numBinders e1) (numBinders e2)
+  | .add e1 e2| .mul e1 e2 | .and e1 e2 | .or e1 e2=> max (numBinders e1) (numBinders e2)
+  | .seq e1 e2 => max (numBinders e1) (numBinders e2)
+  | .proj e _ => numBinders e
+  | .pred e | .succ e | .not e => numBinders e
+  | .rcd f => numBinders_rcd f
+
+def numBinders_rcd : Fields → ℕ
+  | .nil => 0
+  | .cons _ e fs => max (numBinders e) (numBinders_rcd fs)
+end
+instance : Traversable TyField where
+  map := rcd_map
+  traverse := rcd_traverse
+
+mutual
+def ftvs_pos : PType → Set ℕ
+  | .var m => {m}
+  | .bot | .int | .bool => {}
+  | .join τ₁ τ₂ => ftvs_pos τ₁ ∪ ftvs_pos τ₂
+  | .rcd f => ftvs_posrcd f
+  | .arr τ₁ τ₂ => ftvs_neg τ₁ ∪ ftvs_pos τ₂
+  | .fix n τ => ftvs_pos τ \ {n}
+def ftvs_neg : NType → Set ℕ
+  | .var m => {m}
+  | .top | .int | .bool => {}
+  | .meet τ₁ τ₂ => ftvs_neg τ₁ ∪ ftvs_neg τ₂
+  | .rcd f => ftvs_negrcd f
+  | .arr τ₁ τ₂ => ftvs_pos τ₁ ∪ ftvs_neg τ₂
+  | .fix n τ => ftvs_neg τ \ {n}
+def ftvs_posrcd : TyField PType → Set ℕ
+  | .nil => {}
+  | .cons _ τ fs => ftvs_pos τ ∪ ftvs_posrcd fs
+def ftvs_negrcd : TyField NType → Set ℕ
+  | .nil => {}
+  | .cons _ τ fs => ftvs_neg τ ∪ ftvs_negrcd fs
+end
+
+
+mutual
+@[simp]
+def Exp.size : Exp → ℕ
+  | .bvar _ | .fvar _ | .lbool _ | .lint _ | .const _ => 1
+  | .app e1 e2 | .seq e1 e2  | .add e1 e2 | .mul e1 e2  | .and e1 e2 | .or e1 e2  => 1 + e1.size + e2.size
+  | .lam _ e | .fix _ e| .iszero e | .pred e | .succ e   | .not e   => 1 + e.size
+  | .ifc e1 e2 e3   => 1 + e1.size + e2.size + e3.size
+  | .letE _ e1 e2   => 1 + e1.size + e2.size
+  | .proj e _       => 1 + e.size
+  | .rcd f          => 1 + f.size
+@[simp]
+def Fields.size : Fields → ℕ
+  | .nil          => 1
+  | .cons _ e fs  => 1 + e.size + fs.size
+end
+
+mutual
+def free_in_pos : PType → Set ℕ
+  | .bool | .int | .bot => {}
+  | .var n => {n}
+  | .arr t1 t2 => free_in_neg t1 ∪ free_in_pos t2
+  | .join t1 t2 => free_in_pos t1 ∪ free_in_pos t2
+  | .rcd fs => free_in_posrcd fs
+  | .fix n t => free_in_pos t \ {n}
+def free_in_neg : NType → Set ℕ
+  | .bool | .int | .top => {}
+  | .var n => {n}
+  | .arr t1 t2 =>free_in_pos t1 ∪ free_in_neg t2
+  | .rcd fs => free_in_negrcd fs
+  | .meet t1 t2 => free_in_neg t1 ∪ free_in_neg t2
+  | .fix n t => free_in_neg t \ {n}
+
+def free_in_posrcd : TyField PType → Set ℕ
+  | .nil => {}
+  | .cons _ t fs => free_in_pos t ∪ free_in_posrcd fs
+def free_in_negrcd : TyField NType → Set ℕ
+  | .nil => {}
+  | .cons _ t fs => free_in_neg t ∪ free_in_negrcd fs
+end
+
+def free_in_typing (t : Typing) := t.fst
+/- ===== Lattice normalization (Layer 1) =====
+Smart constructors that keep ⊔/⊓ in a canonical form by applying the lattice laws:
+  * idempotence/dedup (τ ⊔ τ = τ),
+  * unit elimination (drop ⊥ in joins, ⊤ in meets),
+  * same-head merging via the dual law:
+      arrows  (A→B) ⊔ (C→D) = (A⊓C)→(B⊔D),  dually for meet,
+      records {l:A} ⊔ {l:B} = {l:A⊔B} (join keeps common labels),
+              {l:A} ⊓ {m:B} = {l:A, m:B} (meet unions labels). -/
+
+def dedupP (l : List PType) : List PType :=
+  l.foldr (fun x acc => if acc.any (· == x) then acc else x :: acc) []
+def dedupN (l : List NType) : List NType :=
+  l.foldr (fun x acc => if acc.any (· == x) then acc else x :: acc) []
+
+/-- Flatten nested joins, dropping ⊥ (the unit of ⊔). -/
+def joinComps : PType → List PType
+  | .join a b => joinComps a ++ joinComps b
+  | .bot => []
+  | t => [t]
+/-- Flatten nested meets, dropping ⊤ (the unit of ⊓). -/
+def meetComps : NType → List NType
+  | .meet a b => meetComps a ++ meetComps b
+  | .top => []
+  | t => [t]
+
+mutual
+partial def mkJoin (a b : PType) : PType := joinList (joinComps a ++ joinComps b)
+partial def mkMeet (a b : NType) : NType := meetList (meetComps a ++ meetComps b)
+
+partial def joinList (comps : List PType) : PType :=
+  let comps := dedupP comps
+  let doms := comps.filterMap (fun | .arr d _ => some d | _ => none)
+  let cods := comps.filterMap (fun | .arr _ c => some c | _ => none)
+  let rcds := comps.filterMap (fun | .rcd f => some f | _ => none)
+  let others := comps.filter (fun | .arr _ _ => false | .rcd _ => false | _ => true)
+  let arrPart : List PType :=
+    match doms, cods with
+    | d :: ds, c :: cs => [PType.arr (ds.foldl mkMeet d) (cs.foldl mkJoin c)]
+    | _, _ => []
+  let rcdPart : List PType :=
+    match rcds with
+    | [] => []
+    | f :: fs => [PType.rcd (fs.foldl mkRcdJoin f)]
+  match others ++ arrPart ++ rcdPart with
+    | [] => .bot
+    | t :: ts => ts.foldl PType.join t
+
+partial def meetList (comps : List NType) : NType :=
+  let comps := dedupN comps
+  let doms := comps.filterMap (fun | .arr d _ => some d | _ => none)
+  let cods := comps.filterMap (fun | .arr _ c => some c | _ => none)
+  let rcds := comps.filterMap (fun | .rcd f => some f | _ => none)
+  let others := comps.filter (fun | .arr _ _ => false | .rcd _ => false | _ => true)
+  let arrPart : List NType :=
+    match doms, cods with
+    | d :: ds, c :: cs => [NType.arr (ds.foldl mkJoin d) (cs.foldl mkMeet c)]
+    | _, _ => []
+  let rcdPart : List NType :=
+    match rcds with
+    | [] => []
+    | f :: fs => [NType.rcd (fs.foldl mkRcdMeet f)]
+  match others ++ arrPart ++ rcdPart with
+    | [] => .top
+    | t :: ts => ts.foldl NType.meet t
+
+/-- Join of records: keep only common labels, join their field types. -/
+partial def mkRcdJoin (f g : TyField PType) : TyField PType :=
+  fields_of_list <| f.toList.filterMap (fun (l, x) =>
+    match lookup g l with
+    | some y => some (l, mkJoin x y)
+    | none => none)
+
+/-- Meet of records: union labels, meet the field types of common labels. -/
+partial def mkRcdMeet (f g : TyField NType) : TyField NType :=
+  let merged := f.toList.map (fun (l, x) =>
+    match lookup g l with
+    | some y => (l, mkMeet x y)
+    | none => (l, x))
+  let extra := g.toList.filter (fun (l, _) => (lookup f l).isNone)
+  fields_of_list (merged ++ extra)
+
+partial def normPos : PType → PType
+  | .join a b => mkJoin (normPos a) (normPos b)
+  | .arr d c => .arr (normNeg d) (normPos c)
+  | .rcd f => .rcd (normRcdPos f)
+  | .fix n t => .fix n (normPos t)
+  | t => t
+
+partial def normNeg : NType → NType
+  | .meet a b => mkMeet (normNeg a) (normNeg b)
+  | .arr d c => .arr (normPos d) (normNeg c)
+  | .rcd f => .rcd (normRcdNeg f)
+  | .fix n t => .fix n (normNeg t)
+  | t => t
+
+partial def normRcdPos : TyField PType → TyField PType
+  | .nil => .nil
+  | .cons l x fs => .cons l (normPos x) (normRcdPos fs)
+
+partial def normRcdNeg : TyField NType → TyField NType
+  | .nil => .nil
+  | .cons l x fs => .cons l (normNeg x) (normRcdNeg fs)
+end
+
+def meet_env (e1 e2 : MonoEnv) : MonoEnv :=
+  e1.mergeWith (fun _ τ₁ τ₂ => mkMeet τ₁ τ₂) e2
+
+def normTyping : Typing → Typing
+  | (Δ, τ) => (Δ.map (fun _ t => normNeg t), normPos τ)
+
+def normBisubst (σ : Bisubst) : Bisubst :=
+  σ.map (fun _ (p, n) => (normPos p, normNeg n))
+
+/- ===== Layer 2: occurrence-based simplification =====
+Operates on the coalesced type scheme (Δ, τ): bounds are already inlined as ⊓/⊔,
+so simplification is just a rewrite over the syntax tree, guided by where each
+*free* type variable occurs and at which polarity. μ-bound variables are tracked
+in `bnd` and excluded throughout. -/
+
+mutual
+/-- Free type-variable occurrences in a positive type, paired with `true`. -/
+partial def occP (bnd : List ℕ) : PType → List (ℕ × Bool)
+  | .var n => if bnd.contains n then [] else [(n, true)]
+  | .bool | .int | .bot => []
+  | .join a b => occP bnd a ++ occP bnd b
+  | .arr d c => occN bnd d ++ occP bnd c
+  | .rcd f => occPRcd bnd f
+  | .fix n t => occP (n :: bnd) t
+/-- Free type-variable occurrences in a negative type, paired with `false`. -/
+partial def occN (bnd : List ℕ) : NType → List (ℕ × Bool)
+  | .var n => if bnd.contains n then [] else [(n, false)]
+  | .bool | .int | .top => []
+  | .meet a b => occN bnd a ++ occN bnd b
+  | .arr d c => occP bnd d ++ occN bnd c
+  | .rcd f => occNRcd bnd f
+  | .fix n t => occN (n :: bnd) t
+partial def occPRcd (bnd : List ℕ) : TyField PType → List (ℕ × Bool)
+  | .nil => []
+  | .cons _ x fs => occP bnd x ++ occPRcd bnd fs
+partial def occNRcd (bnd : List ℕ) : TyField NType → List (ℕ × Bool)
+  | .nil => []
+  | .cons _ x fs => occN bnd x ++ occNRcd bnd fs
+end
+
+/-- Variables occurring positively / negatively somewhere in the scheme
+    (Δ entries are inputs ⇒ negative root, τ is the output ⇒ positive root). -/
+def schemeOccs : Typing → (List ℕ × List ℕ)
+  | (Δ, τ) =>
+    let occs := occP [] τ ++ (Δ.toList.map (fun (_, b) => occN [] b)).flatten
+    (occs.filterMap (fun (n, p) => if p then some n else none),
+     occs.filterMap (fun (n, p) => if p then none else some n))
+
+def applyTyping (σ : Bisubst) : Typing → Typing
+  | (Δ, τ) => (Δ.map (fun _ b => apply_neg σ b), apply_pos σ τ)
+
+/-- Replace variables occurring in only one polarity by the corresponding lattice
+    extremum (⊥ for positive-only, ⊤ for negative-only); units vanish on renorm. -/
+def dropSinglePolar (ty : Typing) : Typing :=
+  let (pos, neg) := schemeOccs ty
+  let σ := pos.foldl
+    (fun σ n => if neg.contains n then σ else σ.insert n (.bot, .var n)) emptyBisubst
+  let σ := neg.foldl
+    (fun σ n => if pos.contains n then σ else σ.insert n (.var n, .top)) σ
+  applyTyping σ ty
+
+mutual
+/-- Drop vacuous recursive binders: `μβ.τ` with `β ∉ τ` ⇒ `τ`. -/
+partial def dropMuP : PType → PType
+  | .fix n t => let t := dropMuP t; if isftv_pos n t then .fix n t else t
+  | .join a b => .join (dropMuP a) (dropMuP b)
+  | .arr d c => .arr (dropMuN d) (dropMuP c)
+  | .rcd f => .rcd (dropMuPRcd f)
+  | t => t
+partial def dropMuN : NType → NType
+  | .fix n t => let t := dropMuN t; if isftv_neg n t then .fix n t else t
+  | .meet a b => .meet (dropMuN a) (dropMuN b)
+  | .arr d c => .arr (dropMuP d) (dropMuN c)
+  | .rcd f => .rcd (dropMuNRcd f)
+  | t => t
+partial def dropMuPRcd : TyField PType → TyField PType
+  | .nil => .nil
+  | .cons l x fs => .cons l (dropMuP x) (dropMuPRcd fs)
+partial def dropMuNRcd : TyField NType → TyField NType
+  | .nil => .nil
+  | .cons l x fs => .cons l (dropMuN x) (dropMuNRcd fs)
+end
+
+def dropMuTyping : Typing → Typing
+  | (Δ, τ) => (Δ.map (fun _ b => dropMuN b), dropMuP τ)
+
+def typingEq (a b : Typing) : Bool :=
+  a.1.toList == b.1.toList && a.2 == b.2
+
+def simpStep (ty : Typing) : Typing :=
+  normTyping (dropMuTyping (dropSinglePolar ty))
+
+/-- Iterate simplification to a fixpoint (bounded by `fuel`). -/
+def simpFix : ℕ → Typing → Typing
+  | 0, ty => ty
+  | fuel + 1, ty =>
+    let ty' := simpStep ty
+    if typingEq ty ty' then ty else simpFix fuel ty'
+
+def simplify (ty : Typing) : Typing := simpFix 100 (normTyping ty)
+
+mutual
+@[simp]
+def open_expr_at (k : ℕ) (x : String) : Exp → Exp
+  | .bvar i => if i == k then (.fvar x) else (.bvar i)
+  | .fvar y => .fvar y
+  | .lbool b => .lbool b
+  | .lint n => .lint n
+  | .const c => .const c
+  | .iszero t => .iszero (open_expr_at k x t)
+  | .pred t => .pred (open_expr_at k x t)
+  | .succ t => .succ (open_expr_at k x t)
+  | .not t => .not (open_expr_at k x t)
+  | .app t₁ t₂ => .app (open_expr_at k x t₁) (open_expr_at k x t₂)
+  | .add t₁ t₂ => .add (open_expr_at k x t₁) (open_expr_at k x t₂)
+  | .mul t₁ t₂ => .mul (open_expr_at k x t₁) (open_expr_at k x t₂)
+  | .and t₁ t₂ => .and (open_expr_at k x t₁) (open_expr_at k x t₂)
+  | .or t₁ t₂ => .or (open_expr_at k x t₁) (open_expr_at k x t₂)
+  | .seq t₁ t₂ => .seq (open_expr_at k x t₁) (open_expr_at (k + 1) x t₂)
+  | .lam y t => .lam y (open_expr_at (k + 1) x t)
+  | .ifc t₁ t₂ t₃ => .ifc (open_expr_at k x t₁) (open_expr_at k x t₂) (open_expr_at k x t₃)
+  | .fix y t => .fix y (open_expr_at (k + 1) x t)
+  | .proj f y => .proj (open_expr_at k x f) y
+  | .letE y t₁ t₂ => .letE y (open_expr_at k x t₁) (open_expr_at (k + 1) x t₂)
+  | .rcd f => .rcd (open_rcd_at k x f)
+  @[simp]
+def open_rcd_at (k : ℕ) (x : String) : Fields → Fields
+  | .nil => .nil
+  | .cons l e fs => .cons l (open_expr_at k x e) (open_rcd_at k x fs)
+end
+@[elab_as_elim]
+theorem Exp.induct
+  {motive : Exp → Prop}
+  (base_bool : ∀ b, motive (.lbool b))
+  (base_int : ∀ n, motive (.lint n))
+  (base_const : ∀ c, motive (.const c))
+  (base_bvar : ∀ n, motive (.bvar n))
+  (base_fvar : ∀ s, motive (.fvar s))
+  (base_nil : motive (.rcd .nil))
+  (ind_lam : ∀ x e, motive e → motive (.lam x e))
+  (ind_app : ∀ e1 e2, motive e1 → motive e2 → motive (.app e1 e2))
+  (ind_seq : ∀ e1 e2, motive e1 → motive e2 → motive (.seq e1 e2))
+  (ind_fix : ∀ x e, motive e → motive (.fix x e))
+  (ind_if : ∀ e1 e2 e3, motive e1 → motive e2 → motive e3 → motive (.ifc e1 e2 e3))
+  (ind_let : ∀ x e1 e2, motive e1 → motive e2 → motive (.letE x e1 e2))
+  (ind_cons : ∀ x e fs, motive e → motive (.rcd fs) → motive (.rcd (.cons x e fs)))
+  (ind_proj : ∀ e x, motive e → motive (.proj e x))
+  (ind_succ : ∀e, motive e → motive (.succ e))
+  (ind_pred : ∀ e, motive e → motive (.pred e))
+  (ind_iszero : ∀ e, motive e → motive (.iszero e))
+  (ind_add : ∀ e1 e2, motive e1 → motive e2 → motive (.add e1 e2))
+  (ind_mul : ∀ e1 e2, motive e1 → motive e2 → motive (.mul e1 e2))
+  (ind_not : ∀ e, motive e → motive (.not e))
+  (ind_and : ∀ e1 e2, motive e1 → motive e2 → motive (.and e1 e2))
+  (ind_or : ∀ e1 e2, motive e1 → motive e2 → motive (.or e1 e2))
+  (e : Exp) : motive e :=
+  Exp.rec (motive_1 := motive) (motive_2 := fun fs => motive (.rcd fs))
+    base_bvar base_fvar base_const ind_app base_bool base_int ind_lam ind_fix
+    (fun _f ih => ih)
+    ind_if
+    ind_let
+    ind_seq
+    ind_succ
+    ind_pred
+    ind_iszero ind_add ind_mul ind_not ind_and ind_or ind_proj
+    base_nil ind_cons
+    e
+
+mutual
+@[elab_as_elim]
+theorem PType.induct
+  {motive : Ty → Prop}
+  (base_pvar : ∀ n, motive (.pos (.var n)))
+  (base_bool : motive (.pos (.bool)))
+  (base_int : motive (.pos (.int)))
+  (base_bot : motive (.pos (.bot)))
+  (base_nil : motive (.pos (.rcd .nil)))
+  (ind_arr : ∀ τ₁ τ₂, motive (.neg τ₁) → motive (.pos τ₂) → motive (.pos (.arr τ₁ τ₂)))
+  (ind_join : ∀ τ₁ τ₂, motive (.pos τ₁) → motive (.pos τ₂) → motive (.pos (.join τ₁ τ₂)))
+  (ind_rcd : ∀ x τ τ', motive (.pos τ) → motive (.pos (.rcd τ')) → motive (.pos (.rcd (.cons x τ τ'))))
+  (ind_fix : ∀n τ, motive (.pos τ) → motive (.pos (.fix n τ)))
+  (τ : PType) : motive (.pos τ) := sorry
+ /--  PType.rec
+   (motive_1 := motive)
+   (motive_2 := fun p => motive (.pos p))
+   (motive_3 := fun n => motive (.neg n))
+   (motive_4 := fun fs => motive (.pos (.rcd fs)))
+   (motive_5 := fun fs => motive (.neg (.rcd fs)))
+   (fun p h => h) (fun n h => h) base_bool base_int base_pvar
+   ind_arr
+   (fun a h => match a with
+                | .nil => base_nil | .cons x t ts => h) ind_join ind_fix base_bot
+   (NType.induct _ _ _ _ _ _ _ _ _ NType.bool) _ _ _ _ _ _ _ _ _ _ _ τ
+--/
+theorem NType.induct
+  {motive : Ty → Prop}
+  (base_nvar : ∀ n, motive (.neg (.var n)))
+  (base_bool : motive (.neg (.bool)))
+  (base_int : motive (.neg (.int)))
+  (base_top : motive (.neg (.top)))
+  (base_nil : motive (.neg (.rcd .nil)))
+  (ind_arr : ∀ τ₁ τ₂, motive (.pos τ₁) → motive (.neg τ₂) → motive (.neg (.arr τ₁ τ₂)))
+  (ind_meet : ∀ τ₁ τ₂, motive (.neg τ₁) → motive (.neg τ₂) → motive (.neg (.meet τ₁ τ₂)))
+  (ind_rcd : ∀ x τ τ', motive (.neg τ) → motive (.neg (.rcd τ')) → motive (.neg (.rcd (.cons x τ τ'))))
+  (ind_fix : ∀ n τ, motive (.neg τ) → motive (.neg (.fix n τ)))
+  (τ : NType) : motive (.neg τ) := sorry
+  /-NType.rec
+  (motive_1 := motive)
+  (motive_2 := fun p => motive (.pos p))
+  (motive_3 := fun n => motive (.neg n))
+  (motive_4 := fun fs => motive (.pos (.rcd fs)))
+  (motive_5 := fun fs => motive (.neg (.rcd fs)))
+  (fun _ h => h) (fun _ h => h)
+  _ _ _ _ _ _ _ _ base_bool base_int base_nvar ind_arr
+  (fun a h => match a with |.nil => base_nil | .cons x t ts => h)
+  ind_meet base_top ind_fix _ _ _ _ τ
+-/
+end
+
+theorem opening_preserves_size : ∀ k x e, (open_expr_at k x e).size = e.size := by
+  intros k x e
+  induction e using Exp.induct generalizing k with
+    | base_bool b | base_int n | base_fvar x | base_nil | base_const c => simp
+    | base_bvar m =>
+        by_cases h : m == k <;> simp[h]
+    | ind_lam y e h =>simp only [open_expr_at, Exp.size, h]
+    | ind_app e1 e2 h1 h2 =>
+      simp only [open_expr_at, Exp.size, h1,h2]
+    | ind_seq e1 e2 h1 h2 =>
+      simp only  [open_expr_at, Exp.size, h1, h2]
+    | ind_fix y e h => simp only [open_expr_at, Exp.size, h]
+    | ind_pred e h | ind_succ e h | ind_iszero e h => simp[h]
+    | ind_add e1 e2 h1 h2 | ind_mul e1 e2 h1 h2 | ind_and e1 e2 h1 h2  | ind_or e1 e2 h1 h2
+        => simp[open_expr_at, Exp.size, h1, h2]
+    | ind_if e1 e2 e3 h1 h2 h3 => simp only [open_expr_at, Exp.size, h1,h2,h3]
+    | ind_let y e1 e2 h1 h2 => simp only [open_expr_at, Exp.size, h1,h2]
+    | ind_not e h => simp only [open_expr_at, Exp.size, h]
+    | ind_cons y e fs he hfs =>
+        simp at hfs
+        simp only [open_expr_at,open_rcd_at, Exp.size, Fields.size, he,hfs]
+    | ind_proj e y h => simp only [open_expr_at, Exp.size, h]
+
+
+def open_expr x e := open_expr_at 0 x e
+
+theorem opening_preserves_size' : ∀ x e, (open_expr x e).size = e.size := by
+  apply opening_preserves_size
