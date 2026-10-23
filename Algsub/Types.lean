@@ -437,22 +437,29 @@ def simplify (t : Ty) (p : Polarity := .pos) : Except String Ty := do{
 }
 
 abbrev Typing := Std.HashMap String Ty × Ty
-
+-- scheme automata
+structure SAutomata where
+  scheme : Automata
+  env : Std.HashMap String StateId
+  res : StateId
+  deriving Repr
 -- Convert type scheme to scheme automata. All types share one node array, so a variable occurring
 -- in both the environment and the result gets flow edges between them; trimming from every root
 -- at once then drops the ε-only nodes. Returns the root of each environment entry and of the result.
 def encode_typing (typ : Typing) :
-    Except String (Automata × Std.HashMap String StateId × StateId) := do{
+    Except String SAutomata := do{
   let (env, ty) := typ;
   let ((envRoots, root), nodes) ← (show FlatM _ from do{
     let envRoots ← env.toList.mapM fun (x, t) ↦ (x, ·) <$> flatten [] .neg t;
     pure (envRoots, ← flatten [] .pos ty)
   }).run #[];
   let (A, roots) := trim (toAutomata nodes) (root :: envRoots.map (·.2));
-  pure (A, .ofList (envRoots.map (·.1) |>.zip roots.tail), roots.head!)
+  pure {scheme := A, env := .ofList (envRoots.map (·.1) |>.zip roots.tail), res := roots.head!}
 }
 
 
+def decode_typing (aut : SAutomata) : Typing :=
+  (aut.env.map (fun _ id => decode aut.scheme id), decode aut.scheme aut.res)
 -- {x : a1, y : a2} ∩ {x : bool, y : a3} -> {x : bool, y : ⊥}
 #eval show_automata (.add (.cons (.rcd [("x", .var "a1"), ("y", .var "a2")]))
               (.cons (.rcd [("x", (.cons (.base 1 []))), ("y", .var "a3")])))
