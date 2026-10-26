@@ -243,4 +243,5 @@ elab_rules : command
 
 #typecheck let rec f = fun x -> {l = x, r = f x} in f
 #typecheck fun x -> let x = x in x x
+#typecheck fun f -> fun x -> f(f x)
 end Algsub

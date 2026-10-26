@@ -240,7 +240,6 @@ def toAutomata (nodes : Array (Polarity × Node ℕ)) (start : StateId := 0) : A
       match nodes[i]!.1 with
       | .neg => negOcc := negOcc.alter v (some <| (start + i) :: ·.getD [])
       | .pos => posOcc := posOcc.alter v (some <| (start + i) :: ·.getD [])
-
   -- a bound occurrence has the same heads and variables as its binder, so point at the binder
   let target (k : ℕ) : ℕ := match nodes[k]! with | (_, .fixVar b) => b | _ => k;
   let mkState (i : ℕ) : State :=
@@ -272,7 +271,8 @@ def trim (A : Automata) (roots : List StateId) : Automata × List StateId := Id.
   let mut cons : Array (List (Head (Std.HashSet StateId))) := #[];
   while h : cons.size < st.2.size do
     let (hs, st') := (A[st.2[cons.size]]!.cons.mapM
-      (Head.mapM fun (ss : Std.HashSet StateId) ↦ Std.HashSet.ofList <$> ss.toList.mapM intern)).run st;
+      (Head.mapM fun (ss : Std.HashSet StateId) ↦
+      Std.HashSet.ofList <$> ss.toList.mapM intern)).run st;
     cons := cons.push hs;
     st := st';
   let (ids, kept) := st;
@@ -295,7 +295,8 @@ abbrev Subset := List StateId
 
 def Subset.ofSet (s : Std.HashSet StateId) : Subset := s.toList.mergeSort (· ≤ ·)
 
-def TyArg.union : TyArg (Std.HashSet StateId) → TyArg (Std.HashSet StateId) → TyArg (Std.HashSet StateId)
+def TyArg.union : TyArg (Std.HashSet StateId) →
+    TyArg (Std.HashSet StateId) → TyArg (Std.HashSet StateId)
   | .pos a,      .pos b        => .pos (a.insertMany b)
   | .neg a,      .neg b        => .neg (a.insertMany b)
   | .negPos n p, .negPos n' p' => .negPos (n.insertMany n') (p.insertMany p')
@@ -457,15 +458,57 @@ def encode_typing (typ : Typing) :
   pure {scheme := A, env := .ofList (envRoots.map (·.1) |>.zip roots.tail), res := roots.head!}
 }
 
-
 def decode_typing (aut : SAutomata) : Typing :=
   (aut.env.map (fun _ id => decode aut.scheme id), decode aut.scheme aut.res)
--- {x : a1, y : a2} ∩ {x : bool, y : a3} -> {x : bool, y : ⊥}
-#eval show_automata (.add (.cons (.rcd [("x", .var "a1"), ("y", .var "a2")]))
-              (.cons (.rcd [("x", (.cons (.base 1 []))), ("y", .var "a3")])))
+
+def simplify_typing (typ : Typing) := do{
+  let aut <- encode_typing typ;
+  let keys := aut.env.keys;
+  let (det, dstates) := determinise aut.scheme (aut.res :: aut.env.values);
+  let (d_minimised, dstates) := minimise det dstates;
+  pure (decode_typing {scheme := d_minimised.toAutomata,
+                       env := Std.HashMap.ofList (List.zip keys dstates.tail),
+                       res := dstates.head!});
+}
+
+-- def merge (aut : SAutomata) (q1 q2 : StateId) : Except String SAutomata := _
+
+
+-- {x : a1, y : a2} ⊔ {x : bool, y : a3} ⇝ {x : bool, y : ⊥}
+#eval detRoundTrip (.add (.cons (.rcd [("x", .add (.var "a3") (.var "a1")), ("y", .var "a2")])) (.cons (.func (.var "a1") (.var "a2"))))
 
 #eval show_automata (.cons (.func (.var "a") (.var "a")))
 #eval show_automata (.cons (.base 1 []))
-#eval encode_typing (Std.HashMap.ofList [("x", Ty.var "a1")], (.cons (.base 1 [])))
-#eval encode_typing (Std.HashMap.ofList [("x", .add (.var "c") (.cons (.func (.var "a") (.var "b"))))], (.add (.var "c") (.cons (.func (.var "a") (.var "b")))))
+#eval encode_typing (Std.HashMap.ofList [("x", .add (.var "a") (.cons (.func (.var "b") (.var "c"))))], (.add (.var "a") (.cons (.func (.var "b") (.var "c")))))
+/-
+Except.ok { scheme := #[{ pol := Types.Polarity.pos,
+                cons := [Types.Head.func (Std.HashSet.ofList [2]) (Std.HashSet.ofList [3])],
+                flow := Std.HashSet.ofList [1] },
+              { pol := Types.Polarity.neg,
+                cons := [Types.Head.func (Std.HashSet.ofList [4]) (Std.HashSet.ofList [5])],
+                flow := Std.HashSet.ofList [0] },
+              { pol := Types.Polarity.neg, cons := [], flow := Std.HashSet.ofList [4] },
+              { pol := Types.Polarity.pos, cons := [], flow := Std.HashSet.ofList [5] },
+              { pol := Types.Polarity.pos, cons := [], flow := Std.HashSet.ofList [2] },
+              { pol := Types.Polarity.neg, cons := [], flow := Std.HashSet.ofList [3] }],
+  env := Std.HashMap.ofList [("x", 1)],
+  res := 0 }-/
+#eval encode_typing (Std.HashMap.ofList [("x", (.cons (.func (.var "b") (.var "c"))))], (.cons (.func (.var "b") (.var "c"))))
+/-
+Except.ok { scheme := #[{ pol := Types.Polarity.pos,
+                cons := [Types.Head.func (Std.HashSet.ofList [2]) (Std.HashSet.ofList [3])],
+                flow := Std.HashSet.ofList [] },
+              { pol := Types.Polarity.neg,
+                cons := [Types.Head.func (Std.HashSet.ofList [4]) (Std.HashSet.ofList [5])],
+                flow := Std.HashSet.ofList [] },
+              { pol := Types.Polarity.neg, cons := [], flow := Std.HashSet.ofList [4] },
+              { pol := Types.Polarity.pos, cons := [], flow := Std.HashSet.ofList [5] },
+              { pol := Types.Polarity.pos, cons := [], flow := Std.HashSet.ofList [2] },
+              { pol := Types.Polarity.neg, cons := [], flow := Std.HashSet.ofList [3] }],
+  env := Std.HashMap.ofList [("x", 1)],
+  res := 0 }-/
+
+#eval encode_typing ({}, (.cons (.func (.var "b") (.cons (.func (.var "c") (.add (.var "b") (.var "c")))))))
+#eval simplify_typing ({}, (.cons (.func (.var "a") (.cons (.func (.var "a") (.var "a"))))))
+#eval simplify_typing ({}, (.cons (.func (.add (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "b") (.var "c")))) (.cons (.func (.var "a") (.var "c"))))))
 end Types
