@@ -370,5 +370,9 @@ def infer (e : Exp) : M Typing := do
 #eval (inferExpr (.fix "f" (.lam "x" (.app (.lam "y" (.lbool True)) (.not (.app (.bvar 1) (.lbool False))))))).run
 
 #eval (inferExpr (.fix "f" (.lam "g" (.lam "y" (.ifc (.lbool False) (.bvar 0) (.app (.bvar 1) (.app (.bvar 2) (.app (.bvar 1) (.bvar 0))))))))).run
+<<<<<<< HEAD
 >>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
+=======
+
+>>>>>>> 4889f49 (Added typing simplification)
 end TypeChecker
