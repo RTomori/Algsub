@@ -270,10 +270,17 @@ def Ty.sum : List Ty → Ty
   | [t] => t
   | t :: ts => .add t (Ty.sum ts)
 
-def flow_vars (aut : Automata) (q : StateId) (s : State) : List Ty :=
+-- flow edges run q⁻ ⇝ q⁺ and are stored at the negative end; this lists each positive state's
+-- flow predecessors, in increasing order
+def flowPreds (flows : Array (Std.HashSet ℕ)) : Std.HashMap ℕ (List ℕ) :=
+  flows.zipIdx.foldr (fun (fl, n) m ↦ fl.fold (fun m p ↦ m.alter p (some <| n :: ·.getD [])) m) {}
+
+-- a negative state with flow edges names a variable; a positive state has the variables of the
+-- negative states flowing into it
+def flow_vars (preds : Std.HashMap StateId (List StateId)) (q : StateId) (s : State) : List Ty :=
   match s.pol with
     | .neg => if s.flow.isEmpty then [] else [.var s!"v{q}"]
-    | .pos => s.flow.toList.filter (· < aut.size) |>.map (fun n ↦ .var s!"v{n}")
+    | .pos => (preds.getD q []).map (fun n ↦ .var s!"v{n}")
 
 /-
 def decode' (aut : Automata) : ℕ → List StateId → StateId → StateM (Std.HashSet StateId) Ty
@@ -293,22 +300,23 @@ def decode' (aut : Automata) : ℕ → List StateId → StateId → StateM (Std.
 def decode (A : Automata) (root : StateId) : Ty :=
     (decode' A (A.size + 1) [] root).run' {}
 -/
-def decode' (aut : Automata) : ℕ → List StateId → StateId → StateM (Std.HashSet StateId) Ty
+def decode' (aut : Automata) (preds : Std.HashMap StateId (List StateId)) :
+    ℕ → List StateId → StateId → StateM (Std.HashSet StateId) Ty
   | 0, _, q => pure (.var s!"r{q}")
   | n + 1, stack, q => do{
     if stack.contains q then
       modify (·.insert q); return (.var s!"r{q}")
     let some s := aut[q]? | return .zero
     let decSet (ss : Std.HashSet StateId) : StateM _ Ty :=
-        Ty.sum <$> ss.toList.mapM (decode' aut n (q :: stack))
+        Ty.sum <$> ss.toList.mapM (decode' aut preds n (q :: stack))
       let heads ← s.cons.mapM (fun h => Ty.cons <$> h.mapM decSet)
-      let body := Ty.sum (heads ++ flow_vars aut q s)
+      let body := Ty.sum (heads ++ flow_vars preds q s)
       let isRec := (← get).contains q;
       modify (·.erase q)
       return if isRec then .fix s!"r{q}" body else body
   }
 def decode (A : Automata) (root : StateId) : Ty :=
-    (decode' A (A.size + 1) [] root).run' {}
+    (decode' A (flowPreds (A.map (·.flow))) (A.size + 1) [] root).run' {}
 
 def create_state
   (p : Polarity) (cons : List (Head (List StateId))) (flow : List StateId) : State :=
@@ -400,13 +408,11 @@ def toAutomata (nodes : Array (Polarity × Node ℕ)) (start : StateId := 0) : A
   let clos := (Array.range nodes.size).map (epsClosure nodes);
   let varsOf (i : ℕ) : List Symbol := clos[i]!.toList.filterMap fun j ↦
     match nodes[j]! with | (_, .var v) => some v | _ => none;
-  let mut negOcc : Std.HashMap Symbol (List StateId) := {};
   let mut posOcc : Std.HashMap Symbol (List StateId) := {};
   for i in [0:nodes.size] do
-    for v in varsOf i do
-      match nodes[i]!.1 with
-      | .neg => negOcc := negOcc.alter v (some <| (start + i) :: ·.getD [])
-      | .pos => posOcc := posOcc.alter v (some <| (start + i) :: ·.getD [])
+    if nodes[i]!.1 = .pos then
+      for v in varsOf i do
+        posOcc := posOcc.alter v (some <| (start + i) :: ·.getD [])
   -- a bound occurrence has the same heads and variables as its binder, so point at the binder
   let target (k : ℕ) : ℕ := match nodes[k]! with | (_, .fixVar b) => b | _ => k;
   let mkState (i : ℕ) : State :=
@@ -416,8 +422,10 @@ def toAutomata (nodes : Array (Polarity × Node ℕ)) (start : StateId := 0) : A
       | (_, .cons h) =>
         some (Head.mapM (m := Id) (fun k ↦ ({start + target k} : Std.HashSet StateId)) h)
       | _ => none;
-    let other := match p with | .pos => negOcc | .neg => posOcc;
-    let flow := (varsOf i).foldl (fun s v ↦ s.insertMany (other.getD v [])) {};
+    -- flow edges run from a negative state to each positive state sharing one of its variables
+    let flow := match p with
+      | .pos => {}
+      | .neg => (varsOf i).foldl (fun s v ↦ s.insertMany (posOcc.getD v [])) {};
     {pol := p, cons := cons, flow := flow};
   return (Array.range nodes.size).map mkState
 }
@@ -562,7 +570,11 @@ def minimise (A : DAutomata) (roots : List DStateId) : DAutomata × List DStateI
   -- `mergeHeads` leaves at most one head per constructor but in no canonical order, so sort
   let edges := A.map fun s ↦
     (s.cons.flatMap Head.edges).mergeSort fun a b ↦ (compare a.1 b.1).isLE;
-    let (cls, n) := classify <| A.map fun s ↦ (s.pol, (s.cons.map Head.tag).mergeSort (fun a b ↦ (compare a b).isLE));
+  -- a positive state's variables come from the flow edges into it, so key on those as well
+  let preds := flowPreds (A.map (·.flow));
+  let (cls, n) := classify <| A.zipIdx.map fun (s, q) ↦
+    (s.pol, (s.cons.map Head.tag).mergeSort (fun a b ↦ (compare a b).isLE),
+     Subset.ofSet s.flow, preds.getD q []);
   let mut cls := cls;
   let mut n := n;
   -- each round only splits classes, so an unchanged count means the partition is stable
