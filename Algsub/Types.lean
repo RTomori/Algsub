@@ -3,8 +3,7 @@ import Std.Data.HashMap
 import Std.Data.HashSet
 import Std.Data.TreeMap
 open Lean hiding Environment Exception
-open Meta
-
+set_option linter.style.longLine false
 
 namespace Types
 inductive Polarity | pos | neg
@@ -28,6 +27,157 @@ inductive Head (α : Type) where
     | variant : List (Symbol × α) → Head α
     | base (stamp : Nat) (args : List (TyArg α))
   deriving BEq, Repr
+
+section ListOrder
+variable {β : Type} {R : β → β → Prop}
+
+theorem forall₂_trans (tr : ∀ {a b c}, R a b → R b c → R a c) :
+    ∀ {l₁ l₂ l₃}, List.Forall₂ R l₁ l₂ → List.Forall₂ R l₂ l₃ → List.Forall₂ R l₁ l₃
+  | _, _, _, .nil, .nil => .nil
+  | _, _, _, .cons h₁ t₁, .cons h₂ t₂ => .cons (tr h₁ h₂) (forall₂_trans tr t₁ t₂)
+
+theorem forall₂_antisymm (anti : ∀ {a b}, R a b → R b a → a = b) :
+    ∀ {l₁ l₂}, List.Forall₂ R l₁ l₂ → List.Forall₂ R l₂ l₁ → l₁ = l₂
+  | _, _, .nil, _ => rfl
+  | _, _, .cons h₁ t₁, .cons h₂ t₂ => by rw [anti h₁ h₂, forall₂_antisymm anti t₁ t₂]
+
+theorem sublistForall₂_refl (refl : ∀ a, R a a) : ∀ l, List.SublistForall₂ R l l
+  | [] => .nil
+  | a :: l => .cons (refl a) (sublistForall₂_refl refl l)
+
+theorem sublistForall₂_trans (tr : ∀ {a b c}, R a b → R b c → R a c) {l₁ l₂ l₃ : List β}
+    (h₁ : List.SublistForall₂ R l₁ l₂) (h₂ : List.SublistForall₂ R l₂ l₃) :
+    List.SublistForall₂ R l₁ l₃ :=
+  haveI : IsTrans β R := ⟨fun _ _ _ => tr⟩
+  IsTrans.trans _ _ _ h₁ h₂
+
+-- mutual embeddings have equal lengths, so neither skips an element
+theorem sublistForall₂_antisymm (anti : ∀ {a b}, R a b → R b a → a = b) {l₁ l₂ : List β}
+    (h₁ : List.SublistForall₂ R l₁ l₂) (h₂ : List.SublistForall₂ R l₂ l₁) : l₁ = l₂ := by
+  obtain ⟨m₁, f₁, s₁⟩ := List.sublistForall₂_iff.1 h₁
+  obtain ⟨m₂, f₂, s₂⟩ := List.sublistForall₂_iff.1 h₂
+  have := f₁.length_eq; have := f₂.length_eq; have := s₁.length_le; have := s₂.length_le
+  obtain rfl := s₁.eq_of_length (by omega)
+  obtain rfl := s₂.eq_of_length (by omega)
+  exact forall₂_antisymm anti f₁ f₂
+
+theorem sublistForall₂_of_cons {a : β} {l₁ l₂ : List β}
+    (h : List.SublistForall₂ R (a :: l₁) l₂) : List.SublistForall₂ R l₁ l₂ := by
+  obtain ⟨_, f, s⟩ := List.sublistForall₂_iff.1 h
+  cases f with
+  | cons _ f => exact List.sublistForall₂_iff.2 ⟨_, f, (List.sublist_cons_self _ _).trans s⟩
+
+-- matching `a` against the first `b` it fits is never worse than skipping `b`, so greedy decides
+instance decSublistForall₂ [DecidableRel R] : ∀ l₁ l₂, Decidable (List.SublistForall₂ R l₁ l₂)
+  | [], _ => isTrue .nil
+  | _ :: _, [] => isFalse nofun
+  | a :: l₁, b :: l₂ =>
+    if hr : R a b then
+      haveI := decSublistForall₂ l₁ l₂
+      decidable_of_iff _ ⟨.cons hr, fun
+        | .cons _ h => h
+        | .cons_right h => sublistForall₂_of_cons h⟩
+    else
+      haveI := decSublistForall₂ (a :: l₁) l₂
+      decidable_of_iff _ ⟨.cons_right, fun
+        | .cons h _ => absurd h hr
+        | .cons_right h => h⟩
+end ListOrder
+
+-- labels must agree, payloads are compared by `R`
+def fieldRel (R : α → α → Prop) (p q : Symbol × α) : Prop := p.1 = q.1 ∧ R p.2 q.2
+
+instance [DecidableRel R] : DecidableRel (fieldRel R) := fun _ _ ↦
+  inferInstanceAs (Decidable (_ ∧ _))
+
+theorem fieldRel.trans (tr : ∀ {a b c : α}, R a b → R b c → R a c) {p q r : Symbol × α} :
+    fieldRel R p q → fieldRel R q r → fieldRel R p r
+  | ⟨e₁, h₁⟩, ⟨e₂, h₂⟩ => ⟨e₁.trans e₂, tr h₁ h₂⟩
+
+theorem fieldRel.antisymm (anti : ∀ {a b : α}, R a b → R b a → a = b) {p q : Symbol × α} :
+    fieldRel R p q → fieldRel R q p → p = q
+  | ⟨e, h₁⟩, ⟨_, h₂⟩ => Prod.ext e (anti h₁ h₂)
+
+-- a `base` argument is ordered by its slot's variance
+def TyArg.le [LE α] : TyArg α → TyArg α → Prop
+  | .pos a,      .pos b        => a ≤ b
+  | .neg a,      .neg b        => b ≤ a
+  | .negPos n p, .negPos n' p' => n' ≤ n ∧ p ≤ p'
+  | .none,       .none         => True
+  | _,           _             => False
+
+instance [LE α] : LE (TyArg α) := ⟨TyArg.le⟩
+
+instance [LE α] [DecidableLE α] : DecidableLE (TyArg α) := fun a b ↦ by
+  change Decidable (TyArg.le a b)
+  cases a <;> cases b <;> dsimp only [TyArg.le] <;> infer_instance
+
+instance [PartialOrder α] : PartialOrder (TyArg α) where
+  le := (· ≤ ·)
+  le_refl a := by cases a <;> dsimp only [LE.le, TyArg.le] <;> simp
+  le_trans a b c h₁ h₂ := by
+    cases a <;> cases b <;> try exact (h₁ : False).elim
+    all_goals cases c <;> try exact (h₂ : False).elim
+    · exact le_trans (α := α) h₁ h₂
+    · exact le_trans (α := α) h₂ h₁
+    · exact ⟨le_trans h₂.1 h₁.1, le_trans h₁.2 h₂.2⟩
+    · trivial
+  le_antisymm a b h₁ h₂ := by
+    cases a <;> cases b <;> try exact (h₁ : False).elim
+    · exact congrArg _ (le_antisymm (α := α) h₁ h₂)
+    · exact congrArg _ (le_antisymm (α := α) h₂ h₁)
+    · exact congrArg₂ _ (le_antisymm h₂.1 h₁.1) (le_antisymm h₁.2 h₂.2)
+    · rfl
+
+instance [BEq α] [Hashable α] : LE (Std.HashSet α) where
+  le s₁ s₂ := s₁.all (s₂.contains ·)
+
+-- `a ≤ b` unfolds to `a.all (b.contains ·) = true`, so decide it by `Bool` equality
+instance [BEq α] [Hashable α] : DecidableLE (Std.HashSet α) :=
+  fun a b ↦ instDecidableEqBool (a.all (b.contains ·)) true
+
+-- Subtyping between heads: functions are contravariant in the domain, records lose fields going
+-- up, variants gain cases. Field lists are matched in order (an order-preserving embedding), so
+-- this is antisymmetric on lists, and it coincides with ordinary width/depth subtyping when
+-- fields are kept sorted by label without duplicates.
+def Head.le [LE α] : Head α → Head α → Prop
+  | .func d₁ c₁, .func d₂ c₂     => d₂ ≤ d₁ ∧ c₁ ≤ c₂
+  | .rcd fs₁, .rcd fs₂           => List.SublistForall₂ (fieldRel (· ≥ ·)) fs₂ fs₁
+  | .variant cs₁, .variant cs₂   => List.SublistForall₂ (fieldRel (· ≤ ·)) cs₁ cs₂
+  | .base k₁ as₁, .base k₂ as₂   => k₁ = k₂ ∧ List.Forall₂ (· ≤ ·) as₁ as₂
+  | _, _                         => False  -- distinct constructors are incomparable
+
+instance [LE α] : LE (Head α) := ⟨Head.le⟩
+
+instance [LE α] [DecidableLE α] : DecidableLE (Head α) := fun a b ↦ by
+  change Decidable (Head.le a b)
+  cases a <;> cases b <;> dsimp only [Head.le] <;> infer_instance
+
+instance [PartialOrder α] : PartialOrder (Head α) where
+  le := (· ≤ ·)
+  le_refl h := by
+    cases h
+    · exact ⟨le_rfl, le_rfl⟩
+    · exact sublistForall₂_refl (fun _ ↦ ⟨rfl, le_rfl⟩) _
+    · exact sublistForall₂_refl (fun _ ↦ ⟨rfl, le_rfl⟩) _
+    · exact ⟨rfl, List.forall₂_same.2 fun _ _ ↦ le_rfl⟩
+  le_trans a b c h₁ h₂ := by
+    cases a <;> cases b <;> try exact (h₁ : False).elim
+    all_goals cases c <;> try exact (h₂ : False).elim
+    · exact ⟨le_trans h₂.1 h₁.1, le_trans h₁.2 h₂.2⟩
+    · exact sublistForall₂_trans (R := fieldRel (· ≥ ·)) (fieldRel.trans ge_trans) h₂ h₁
+    · exact sublistForall₂_trans (R := fieldRel (· ≤ ·))
+        (fieldRel.trans (R := (· ≤ ·)) le_trans) h₁ h₂
+    · exact ⟨h₁.1.trans h₂.1, forall₂_trans (R := (· ≤ ·)) le_trans h₁.2 h₂.2⟩
+  le_antisymm a b h₁ h₂ := by
+    cases a <;> cases b <;> try exact (h₁ : False).elim
+    · exact congrArg₂ _ (le_antisymm h₂.1 h₁.1) (le_antisymm h₁.2 h₂.2)
+    · exact congrArg _ <| sublistForall₂_antisymm (R := fieldRel (· ≥ ·))
+        (fieldRel.antisymm ge_antisymm) h₂ h₁
+    · exact congrArg _ <| sublistForall₂_antisymm (R := fieldRel (· ≤ ·))
+        (fieldRel.antisymm le_antisymm) h₁ h₂
+    · obtain ⟨rfl, h₁⟩ := h₁
+      exact congrArg _ (forall₂_antisymm (R := (· ≤ ·)) le_antisymm h₁ h₂.2)
 
 
 abbrev StateId := ℕ
@@ -75,7 +225,8 @@ inductive Variance
 
 structure TyCtx where
   next : Nat := 1
-  decls : Std.HashMap ℕ (Symbol × Array Variance) := {}
+  decls : Std.HashMap ℕ (Symbol × Array Variance)
+    := Std.HashMap.ofList [(1, ("bool", {})), (2, ("int", {}))]
   byName : Std.HashMap Symbol ℕ := {}
 
 structure Typechecker.Context where
@@ -87,7 +238,8 @@ structure Typechecker.State where
   seen : Std.HashSet (StateId × StateId) := {}
 
 
-abbrev M := ReaderT Context <| StateT Typechecker.State <| Except String
+abbrev M := ReaderT Typechecker.Context
+                      <| StateT Typechecker.State <| Except String
 
 def M.run (x : M α) : Except String α := x {} |>.run' {}
 -- Things needed to put automata back into type syntax
@@ -104,7 +256,8 @@ def TyArg.mapM [Monad m] (f : α → m β) : TyArg α → m (TyArg β)
 
 def Head.mapM [Monad m] (f : α → m β) : Head α → m (Head β)
   | .func d c => .func <$> f d <*> f c
-  | .rcd fs | .variant fs => .rcd <$> fs.mapM (fun (l, a) ↦ (l, · ) <$> f a)
+  | .rcd fs => .rcd <$> fs.mapM (fun (l, a) ↦ (l, · ) <$> f a)
+  | .variant fs => .variant <$> fs.mapM (fun (l, a) ↦ (l, ·) <$> f a)
   | .base k args => .base k <$> args.mapM (TyArg.mapM f)
 
 def Ty.sum : List Ty → Ty
@@ -117,13 +270,6 @@ def flow_vars (aut : Automata) (q : StateId) (s : State) : List Ty :=
     | .neg => if s.flow.isEmpty then [] else [.var s!"v{q}"]
     | .pos => s.flow.toList.filter (· < aut.size) |>.map (fun n ↦ .var s!"v{n}")
 
-def flow_pair : M Automata := do{
-  let id_pos ← mkFreshId;
-  let id_neg ← mkFreshId;
-  let pos : State := {pol := .pos, cons := [], flow := {id_neg}};
-  let neg : State := {pol := .neg, cons := [], flow := {id_pos}};
-  pure #[pos, neg]
-}
 def decode' (aut : Automata) : ℕ → List StateId → StateId → StateM (Std.HashSet StateId) Ty
   | 0, _, q => pure (.var s!"r{q}")
   | n + 1, stack, q => do{
@@ -178,7 +324,8 @@ def TyArg.mapPolM [Monad m] (f : Polarity → α → m β) (p : Polarity) : TyAr
 
 def Head.mapPolM [Monad m] (f : Polarity → α → m β) (p : Polarity) : Head α → m (Head β)
   | .func d c => .func <$> f p.flip d <*> f p c
-  | .rcd fs | .variant fs => .rcd <$> fs.mapM (fun (l, a) ↦ (l, ·) <$> f p a)
+  | .rcd fs => .rcd <$> fs.mapM (fun (l, a) ↦ (l, ·) <$> f p a)
+  | .variant fs => .variant <$> fs.mapM (fun (l, a) ↦ (l, ·) <$> f p a)
   | .base k args => .base k <$> args.mapM (TyArg.mapPolM f p)
 
 -- Step 1: one node per subterm; μ-bound occurrences point back at their binder
@@ -226,9 +373,6 @@ def epsClosure (nodes : Array (Polarity × Node ℕ)) (i : ℕ) : Std.HashSet �
   return seen
 }
 
--- Step 3: every node becomes a state holding the heads of its ε-closure;
--- flow edges join each negative and positive state mentioning the same variable.
--- Node `i` becomes state `start + i`, so the result can be appended to an automaton of size `start`
 def toAutomata (nodes : Array (Polarity × Node ℕ)) (start : StateId := 0) : Automata := Id.run do{
   let clos := (Array.range nodes.size).map (epsClosure nodes);
   let varsOf (i : ℕ) : List Symbol := clos[i]!.toList.filterMap fun j ↦
@@ -249,11 +393,13 @@ def toAutomata (nodes : Array (Polarity × Node ℕ)) (start : StateId := 0) : A
       | (_, .cons h) =>
         some (Head.mapM (m := Id) (fun k ↦ ({start + target k} : Std.HashSet StateId)) h)
       | _ => none;
-    let other := match p with | .pos => negOcc | .neg => posOcc;
-    let flow := (varsOf i).foldl (fun s v ↦ s.insertMany (other.getD v [])) {};
+    let flow := match p with
+      | .pos => {}
+      | .neg => (varsOf i).foldl (fun s v ↦ s.insertMany (posOcc.getD v [])) {};
     {pol := p, cons := cons, flow := flow};
   return (Array.range nodes.size).map mkState
 }
+
 
 -- dense id of a key; a new key is appended to the array, which doubles as the worklist
 def intern [BEq κ] [Hashable κ] (k : κ) : StateM (Std.HashMap κ ℕ × Array κ) ℕ :=
@@ -389,13 +535,16 @@ def classify [BEq κ] [Hashable κ] (keys : Array κ) : Array ℕ × ℕ := Id.r
   return (cls, ids.size)
 }
 
+
 def minimise (A : DAutomata) (roots : List DStateId) : DAutomata × List DStateId := Id.run do{
   -- `mergeHeads` leaves at most one head per constructor but in no canonical order, so sort
   let edges := A.map fun s ↦
     (s.cons.flatMap Head.edges).mergeSort fun a b ↦ (compare a.1 b.1).isLE;
-  let (cls, n) := classify <| A.map fun s ↦
+  let preds : Std.HashMap DStateId (List DStateId) :=
+    A.zipIdx.foldl (fun m (s, n) ↦ s.flow.fold (fun m p ↦ m.alter p (some <| n :: ·.getD [])) m) {};
+  let (cls, n) := classify <| A.zipIdx.map fun (s, q) ↦
     (s.pol, (s.cons.map Head.tag).mergeSort (fun a b ↦ (compare a b).isLE),
-     Subset.ofSet s.flow);
+     Subset.ofSet s.flow, (preds.getD q []).mergeSort (· ≤ ·));
   let mut cls := cls;
   let mut n := n;
   -- each round only splits classes, so an unchanged count means the partition is stable
@@ -418,7 +567,10 @@ def minimise (A : DAutomata) (roots : List DStateId) : DAutomata × List DStateI
 
 -- a DFA is an NFA with singleton successor sets, so `decode` can be reused
 def DAutomata.toAutomata (A : DAutomata) : Automata :=
-  A.map fun s ↦ {pol := s.pol, cons := s.cons.map (Head.mapM (m := Id) fun d ↦ ({d} : Std.HashSet StateId)), flow := s.flow}
+  A.map fun s ↦
+  {pol := s.pol,
+   cons := s.cons.map (Head.mapM (m := Id) fun d ↦ ({d} : Std.HashSet StateId)),
+   flow := s.flow}
 
 def detRoundTrip (t : Ty) (p : Polarity := .pos) : Except String Ty := do{
   let (A, r) ← encode t p;
@@ -471,10 +623,27 @@ def simplify_typing (typ : Typing) := do{
                        res := dstates.head!});
 }
 
--- def merge (aut : SAutomata) (q1 q2 : StateId) : Except String SAutomata := _
+-- add head constructors/transitions/flow edges from q2 to q1
+-- since flow edges are symmetric, not directed, it suffices to copy flow edges of q2 to q1
 
+def SAutomata.merge (aut : SAutomata) (q1 q2 : StateId)
+                    {h₁ : q1 < aut.scheme.size} {h₂ : q2 < aut.scheme.size}
+                    : ExceptT String (StateM SAutomata) Unit :=
+    match s₁.pol, s₂.pol with
+      | .pos, .pos => do{
+        let head := mergeHeads .pos (s₁.cons ++ s₂.cons);
+        set ({scheme := aut.scheme.set q1 {pol := s₁.pol, cons := head, flow := s₁.flow ∪ s₂.flow}, env := aut.env, res := aut.res} : SAutomata)
+        }
+      | .neg, .neg =>
+        let head := mergeHeads .neg (s₁.cons ++ s₂.cons);
+        set ({scheme :=
+            aut.scheme.set q1 {pol := s₁.pol, cons := head, flow := s₁.flow ∪ s₂.flow},
+              env := aut.env, res := aut.res} : SAutomata)
+      | _, _ => throw s!"Cannot merge states of distinct polarities"
+    where
+      s₁ := aut.scheme[q1]'h₁
+      s₂ := aut.scheme[q2]'h₂
 
--- {x : a1, y : a2} ⊔ {x : bool, y : a3} ⇝ {x : bool, y : ⊥}
 #eval detRoundTrip (.add (.cons (.rcd [("x", .add (.var "a3") (.var "a1")), ("y", .var "a2")])) (.cons (.func (.var "a1") (.var "a2"))))
 
 #eval show_automata (.cons (.func (.var "a") (.var "a")))
@@ -508,6 +677,7 @@ Except.ok { scheme := #[{ pol := Types.Polarity.pos,
   env := Std.HashMap.ofList [("x", 1)],
   res := 0 }-/
 
+#eval simplify_typing ({}, .cons (.func (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "a") (.var "b")))))
 #eval encode_typing ({}, (.cons (.func (.var "b") (.cons (.func (.var "c") (.add (.var "b") (.var "c")))))))
 #eval simplify_typing ({}, (.cons (.func (.var "a") (.cons (.func (.var "a") (.var "a"))))))
 #eval simplify_typing ({}, (.cons (.func (.add (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "b") (.var "c")))) (.cons (.func (.var "a") (.var "c"))))))
