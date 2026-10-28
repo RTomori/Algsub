@@ -265,11 +265,19 @@ def Ty.sum : List Ty → Ty
   | [t] => t
   | t :: ts => .add t (Ty.sum ts)
 
-def flow_vars (aut : Automata) (q : StateId) (s : State) : List Ty :=
+-- flow edges run q⁻ ⇝ q⁺ and are stored at the negative end; this lists each positive state's
+-- flow predecessors, in increasing order
+def flowPreds (flows : Array (Std.HashSet ℕ)) : Std.HashMap ℕ (List ℕ) :=
+  flows.zipIdx.foldr (fun (fl, n) m ↦ fl.fold (fun m p ↦ m.alter p (some <| n :: ·.getD [])) m) {}
+
+-- a negative state with flow edges names a variable; a positive state has the variables of the
+-- negative states flowing into it
+def flow_vars (preds : Std.HashMap StateId (List StateId)) (q : StateId) (s : State) : List Ty :=
   match s.pol with
     | .neg => if s.flow.isEmpty then [] else [.var s!"v{q}"]
-    | .pos => s.flow.toList.filter (· < aut.size) |>.map (fun n ↦ .var s!"v{n}")
+    | .pos => (preds.getD q []).map (fun n ↦ .var s!"v{n}")
 
+/-
 def decode' (aut : Automata) : ℕ → List StateId → StateId → StateM (Std.HashSet StateId) Ty
   | 0, _, q => pure (.var s!"r{q}")
   | n + 1, stack, q => do{
@@ -286,6 +294,24 @@ def decode' (aut : Automata) : ℕ → List StateId → StateId → StateM (Std.
   }
 def decode (A : Automata) (root : StateId) : Ty :=
     (decode' A (A.size + 1) [] root).run' {}
+-/
+def decode' (aut : Automata) (preds : Std.HashMap StateId (List StateId)) :
+    ℕ → List StateId → StateId → StateM (Std.HashSet StateId) Ty
+  | 0, _, q => pure (.var s!"r{q}")
+  | n + 1, stack, q => do{
+    if stack.contains q then
+      modify (·.insert q); return (.var s!"r{q}")
+    let some s := aut[q]? | return .zero
+    let decSet (ss : Std.HashSet StateId) : StateM _ Ty :=
+        Ty.sum <$> ss.toList.mapM (decode' aut preds n (q :: stack))
+      let heads ← s.cons.mapM (fun h => Ty.cons <$> h.mapM decSet)
+      let body := Ty.sum (heads ++ flow_vars preds q s)
+      let isRec := (← get).contains q;
+      modify (·.erase q)
+      return if isRec then .fix s!"r{q}" body else body
+  }
+def decode (A : Automata) (root : StateId) : Ty :=
+    (decode' A (flowPreds (A.map (·.flow))) (A.size + 1) [] root).run' {}
 
 def create_state
   (p : Polarity) (cons : List (Head (List StateId))) (flow : List StateId) : State :=
@@ -377,13 +403,11 @@ def toAutomata (nodes : Array (Polarity × Node ℕ)) (start : StateId := 0) : A
   let clos := (Array.range nodes.size).map (epsClosure nodes);
   let varsOf (i : ℕ) : List Symbol := clos[i]!.toList.filterMap fun j ↦
     match nodes[j]! with | (_, .var v) => some v | _ => none;
-  let mut negOcc : Std.HashMap Symbol (List StateId) := {};
   let mut posOcc : Std.HashMap Symbol (List StateId) := {};
   for i in [0:nodes.size] do
-    for v in varsOf i do
-      match nodes[i]!.1 with
-      | .neg => negOcc := negOcc.alter v (some <| (start + i) :: ·.getD [])
-      | .pos => posOcc := posOcc.alter v (some <| (start + i) :: ·.getD [])
+    if nodes[i]!.1 = .pos then
+      for v in varsOf i do
+        posOcc := posOcc.alter v (some <| (start + i) :: ·.getD [])
   -- a bound occurrence has the same heads and variables as its binder, so point at the binder
   let target (k : ℕ) : ℕ := match nodes[k]! with | (_, .fixVar b) => b | _ => k;
   let mkState (i : ℕ) : State :=
@@ -393,6 +417,7 @@ def toAutomata (nodes : Array (Polarity × Node ℕ)) (start : StateId := 0) : A
       | (_, .cons h) =>
         some (Head.mapM (m := Id) (fun k ↦ ({start + target k} : Std.HashSet StateId)) h)
       | _ => none;
+    -- flow edges run from a negative state to each positive state sharing one of its variables
     let flow := match p with
       | .pos => {}
       | .neg => (varsOf i).foldl (fun s v ↦ s.insertMany (posOcc.getD v [])) {};
@@ -540,11 +565,11 @@ def minimise (A : DAutomata) (roots : List DStateId) : DAutomata × List DStateI
   -- `mergeHeads` leaves at most one head per constructor but in no canonical order, so sort
   let edges := A.map fun s ↦
     (s.cons.flatMap Head.edges).mergeSort fun a b ↦ (compare a.1 b.1).isLE;
-  let preds : Std.HashMap DStateId (List DStateId) :=
-    A.zipIdx.foldl (fun m (s, n) ↦ s.flow.fold (fun m p ↦ m.alter p (some <| n :: ·.getD [])) m) {};
+  -- a positive state's variables come from the flow edges into it, so key on those as well
+  let preds := flowPreds (A.map (·.flow));
   let (cls, n) := classify <| A.zipIdx.map fun (s, q) ↦
     (s.pol, (s.cons.map Head.tag).mergeSort (fun a b ↦ (compare a b).isLE),
-     Subset.ofSet s.flow, (preds.getD q []).mergeSort (· ≤ ·));
+     Subset.ofSet s.flow, preds.getD q []);
   let mut cls := cls;
   let mut n := n;
   -- each round only splits classes, so an unchanged count means the partition is stable
@@ -625,60 +650,29 @@ def simplify_typing (typ : Typing) := do{
 
 -- add head constructors/transitions/flow edges from q2 to q1
 -- since flow edges are symmetric, not directed, it suffices to copy flow edges of q2 to q1
-
-def SAutomata.merge (aut : SAutomata) (q1 q2 : StateId)
-                    {h₁ : q1 < aut.scheme.size} {h₂ : q2 < aut.scheme.size}
-                    : ExceptT String (StateM SAutomata) Unit :=
-    match s₁.pol, s₂.pol with
-      | .pos, .pos => do{
-        let head := mergeHeads .pos (s₁.cons ++ s₂.cons);
-        set ({scheme := aut.scheme.set q1 {pol := s₁.pol, cons := head, flow := s₁.flow ∪ s₂.flow}, env := aut.env, res := aut.res} : SAutomata)
-        }
-      | .neg, .neg =>
-        let head := mergeHeads .neg (s₁.cons ++ s₂.cons);
-        set ({scheme :=
-            aut.scheme.set q1 {pol := s₁.pol, cons := head, flow := s₁.flow ∪ s₂.flow},
-              env := aut.env, res := aut.res} : SAutomata)
-      | _, _ => throw s!"Cannot merge states of distinct polarities"
-    where
-      s₁ := aut.scheme[q1]'h₁
-      s₂ := aut.scheme[q2]'h₂
+def SAutomata.merge (aut : SAutomata) (q₁ q₂ : StateId)
+                    {h₁ : q₁ < aut.scheme.size} {h₂ : q₂ < aut.scheme.size}
+                    : Except String SAutomata :=
+                        match s₁.pol, s₂.pol with
+                          |.pos, .pos =>
+                            let s₁' : State := {s₁ with cons := mergeHeads .pos (s₁.cons ++ s₂.cons) , flow := s₁.flow ∪ s₂.flow};
+                            pure {aut with scheme := aut.scheme.insertIdxIfInBounds q₁ s₁'}
+                          | .neg, .neg =>
+                            let s₂' : State := {s₂ with cons := mergeHeads .neg (s₁.cons ++ s₂.cons), flow := s₁.flow ∪ s₂.flow};
+                            pure {aut with scheme := aut.scheme.insertIdxIfInBounds q₂ s₂'}
+                          | _, _ => throw s!"cannot merge types with wrong polarity"
+                    where
+                      s₁ := aut.scheme[q₁]'h₁;
+                      s₂ := aut.scheme[q₂]'h₂;
 
 #eval detRoundTrip (.add (.cons (.rcd [("x", .add (.var "a3") (.var "a1")), ("y", .var "a2")])) (.cons (.func (.var "a1") (.var "a2"))))
 
-#eval show_automata (.cons (.func (.var "a") (.var "a")))
+#eval simplify (.cons (.func (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "a") (.var "b")))))
 #eval show_automata (.cons (.base 1 []))
 #eval encode_typing (Std.HashMap.ofList [("x", .add (.var "a") (.cons (.func (.var "b") (.var "c"))))], (.add (.var "a") (.cons (.func (.var "b") (.var "c")))))
-/-
-Except.ok { scheme := #[{ pol := Types.Polarity.pos,
-                cons := [Types.Head.func (Std.HashSet.ofList [2]) (Std.HashSet.ofList [3])],
-                flow := Std.HashSet.ofList [1] },
-              { pol := Types.Polarity.neg,
-                cons := [Types.Head.func (Std.HashSet.ofList [4]) (Std.HashSet.ofList [5])],
-                flow := Std.HashSet.ofList [0] },
-              { pol := Types.Polarity.neg, cons := [], flow := Std.HashSet.ofList [4] },
-              { pol := Types.Polarity.pos, cons := [], flow := Std.HashSet.ofList [5] },
-              { pol := Types.Polarity.pos, cons := [], flow := Std.HashSet.ofList [2] },
-              { pol := Types.Polarity.neg, cons := [], flow := Std.HashSet.ofList [3] }],
-  env := Std.HashMap.ofList [("x", 1)],
-  res := 0 }-/
 #eval encode_typing (Std.HashMap.ofList [("x", (.cons (.func (.var "b") (.var "c"))))], (.cons (.func (.var "b") (.var "c"))))
-/-
-Except.ok { scheme := #[{ pol := Types.Polarity.pos,
-                cons := [Types.Head.func (Std.HashSet.ofList [2]) (Std.HashSet.ofList [3])],
-                flow := Std.HashSet.ofList [] },
-              { pol := Types.Polarity.neg,
-                cons := [Types.Head.func (Std.HashSet.ofList [4]) (Std.HashSet.ofList [5])],
-                flow := Std.HashSet.ofList [] },
-              { pol := Types.Polarity.neg, cons := [], flow := Std.HashSet.ofList [4] },
-              { pol := Types.Polarity.pos, cons := [], flow := Std.HashSet.ofList [5] },
-              { pol := Types.Polarity.pos, cons := [], flow := Std.HashSet.ofList [2] },
-              { pol := Types.Polarity.neg, cons := [], flow := Std.HashSet.ofList [3] }],
-  env := Std.HashMap.ofList [("x", 1)],
-  res := 0 }-/
-
-#eval simplify_typing ({}, .cons (.func (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "a") (.var "b")))))
-#eval encode_typing ({}, (.cons (.func (.var "b") (.cons (.func (.var "c") (.add (.var "b") (.var "c")))))))
+#eval detRoundTrip (.cons (.func (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "a") (.var "b")))))
+#eval simplify_typing ({}, (.cons (.func (.var "b") (.cons (.func (.var "c") (.add (.var "b") (.var "c")))))))
 #eval simplify_typing ({}, (.cons (.func (.var "a") (.cons (.func (.var "a") (.var "a"))))))
 #eval simplify_typing ({}, (.cons (.func (.add (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "b") (.var "c")))) (.cons (.func (.var "a") (.var "c"))))))
 end Types
