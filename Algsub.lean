@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-import Algsub.Basic
-=======
 import Algsub.Parser
 open Lean Elab Term
 
@@ -14,4 +11,3 @@ partial def main : IO Unit := do{
     else
     main;
 }
->>>>>>> 2a25d7c (- Add scratch of automata encoding of types)

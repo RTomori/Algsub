@@ -34,7 +34,7 @@ mutual
 end
 
 /- Types are classified w.r.t. their polarities. Neutral types (logical variables, constants)
-are regarded as type with both polarities -/
+are regarded as type with both polarities
 inductive TyField (α : Type) : Type where
   | nil : TyField α
   | cons : String → α → TyField α → TyField α
@@ -107,17 +107,10 @@ def Ty.Repr : Ty → String
   | .pos τ => τ.Repr
   | .neg τ => τ.Repr
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-instance : Repr PType := {reprPrec := fun t _ ↦ t.Repr}
-=======
 instance : Repr PType := {reprPrec := fun t prec ↦ t.Repr}
->>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
 instance : Repr NType := {reprPrec := fun t prec ↦ t.Repr}
-=======
 instance : Repr PType := {reprPrec := fun t _ ↦ t.Repr}
 instance : Repr NType := {reprPrec := fun t _ ↦ t.Repr}
->>>>>>> 12ea802 (Add automata encoding)
 instance : Repr Ty := {reprPrec := fun t _ ↦ t.Repr }
 
 abbrev MonoEnv := Std.HashMap String NType
@@ -230,7 +223,7 @@ def compose (σ₁ σ₂ : Bisubst) : Bisubst :=
   -- constraints (mapped wins on shared keys, since those are σ₁ applied to σ₂).
   let mapped := σ₂.map (fun _ (τ₁, τ₂) ↦ (apply_pos σ₁ τ₁, apply_neg σ₁ τ₂))
   σ₁.mergeWith (fun _ _ m ↦ m) mapped
-
+-/
 -- Free variables in expressions
 mutual
 def fv : Exp → Finset String
@@ -251,6 +244,7 @@ def fv_rcd : Fields → Finset String
   | .nil => {}
   | .cons _ e fs => fv e ∪ fv_rcd fs
 end
+/-
 mutual
 def isftv_pos (n : ℕ) : PType → Bool
   | .var m => m == n
@@ -275,7 +269,7 @@ def isftv_negrcd (n : ℕ) : TyField NType → Bool
   | .nil => false
   | .cons _ τ fs => isftv_neg n τ || isftv_negrcd n fs
 end
-
+-/
 mutual
 def numBinders : Exp → ℕ
   | .bvar _|.lbool _ | .lint _ | .fvar _ | .const _=> 0
@@ -294,6 +288,7 @@ def numBinders_rcd : Fields → ℕ
   | .nil => 0
   | .cons _ e fs => max (numBinders e) (numBinders_rcd fs)
 end
+/-
 instance : Traversable TyField where
   map := rcd_map
   traverse := rcd_traverse
@@ -321,7 +316,7 @@ def ftvs_negrcd : TyField NType → Set ℕ
   | .cons _ τ fs => ftvs_neg τ ∪ ftvs_negrcd fs
 end
 
-
+-/
 mutual
 @[simp]
 def Exp.size : Exp → ℕ
@@ -338,7 +333,7 @@ def Fields.size : Fields → ℕ
   | .nil          => 1
   | .cons _ e fs  => 1 + e.size + fs.size
 end
-
+/-
 mutual
 def free_in_pos : PType → Set ℕ
   | .bool | .int | .bot => {}
@@ -568,7 +563,7 @@ def simpFix : ℕ → Typing → Typing
     if typingEq ty ty' then ty else simpFix fuel ty'
 
 def simplify (ty : Typing) : Typing := simpFix 100 (normTyping ty)
-
+-/
 mutual
 @[simp]
 def open_expr_at (k : ℕ) (x : String) : Exp → Exp
@@ -635,7 +630,7 @@ theorem Exp.induct
     ind_iszero ind_add ind_mul ind_not ind_and ind_or ind_proj
     base_nil ind_cons
     e
-
+/-
 mutual
 @[elab_as_elim]
 theorem PType.induct
@@ -687,6 +682,7 @@ theorem NType.induct
   ind_meet base_top ind_fix _ _ _ _ τ
 -/
 end
+-/
 
 theorem opening_preserves_size : ∀ k x e, (open_expr_at k x e).size = e.size := by
   intros k x e
@@ -716,30 +712,3 @@ def open_expr x e := open_expr_at 0 x e
 
 theorem opening_preserves_size' : ∀ x e, (open_expr x e).size = e.size := by
   apply opening_preserves_size
-<<<<<<< HEAD
-
-namespace Types
-inductive Polarity | pos | neg
-  deriving DecidableEq, Repr, Inhabited
-
-def Polarity.flip : Polarity -> Polarity
-  | .pos => .neg | .neg => .pos
-
-abbrev Symbol := String
-
-inductive TyArg (α : Type) where
-  | pos (a : α) | neg (a : α) | negPos (n p : α) | none
-  deriving BEq, Repr
-
-inductive Head (α : Type) where
-  | func : α → α → Head α
-  | rcd : List (Symbol × α) → Head α
-  | base (stamp : ℕ) (args : List (TyArg α))
-deriving BEq, Repr
-
-inductive TypeLat (α : Type) where
-  | LZero | LUnexpanded 
-
-end Types
-=======
->>>>>>> 2a25d7c (- Add scratch of automata encoding of types)

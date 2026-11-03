@@ -1,42 +1,5 @@
 import Lean
-<<<<<<< HEAD
-import Algsub.Basic
-
-open Lean Elab Meta
-
-declare_syntax_cat Term
-
-declare_syntax_cat Field
-syntax ident "=" Term : Field
-syntax Term : Field
-declare_syntax_cat NEFields
-syntax Field : NEFields
-syntax ident "=" Term "," NEFields : NEFields
-
-declare_syntax_cat Atom
-syntax "(" Term ")" : Atom
-syntax ident : Atom
-syntax num : Atom
-syntax "true" : Atom
-syntax "false" : Atom
-syntax "{}" : Atom
-syntax "{" NEFields "}" : Atom
-
-declare_syntax_cat PathTerm
-syntax PathTerm "." ident : PathTerm
-syntax Atom : PathTerm
-
-declare_syntax_cat AppTerm
-syntax PathTerm : AppTerm
-syntax AppTerm PathTerm : AppTerm
-
-syntax AppTerm : Term
-syntax "if" Term "then" Term "else" Term : Term
-syntax "let" ident "=" Term "in" Term : Term
-syntax "fun" ident "->" Term : Term
-syntax "fix" Term : Term
-=======
-import Algsub.Typing
+import Algsub.Typecheck
 
 /-!
 # Concrete syntax for the ML-like core language
@@ -254,7 +217,7 @@ elab_rules : command
       Lean.Elab.Command.elabCommand (← `(command|
         #eval show IO Unit from do
           IO.print ($(quote src))
-          IO.println (" ⊩ " ++ toString (repr (TypeChecker.inferExpr $t).run))))
+          IO.println (" ⊩ " ++ toString (repr (Typecheck.infer $t)))))
 
 
 #typecheck fun g -> fun h -> fun y -> if false then y else h (g (h y))
@@ -271,7 +234,7 @@ elab_rules : command
 
 #typecheck fun x -> if x.p then x.q else x.q
 #typecheck fix g => fun x -> g 2 + g false
-
+#typecheck fix x => x x
 
 
 #typecheck let f = fun x -> x in f f
@@ -281,5 +244,8 @@ elab_rules : command
 #typecheck let rec f = fun x -> {l = x, r = f x} in f
 #typecheck fun x -> let x = x in x x
 #typecheck fun f -> fun x -> f(f x)
+#typecheck let f = fun x -> x in f f
+-- Double -- coupled
+#typecheck let rec double = fun f -> fun y -> f (f y) in let foo = fun v -> double(fun x -> x + 1) v in let goo = fun w -> double not w in {l = foo 3,r = goo true}
+
 end Algsub
->>>>>>> 2a25d7c (- Add scratch of automata encoding of types)

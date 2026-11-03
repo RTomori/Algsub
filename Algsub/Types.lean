@@ -1,9 +1,4 @@
 import Mathlib.Tactic
-<<<<<<< HEAD
-import Algsub.Basic
-
--- graph-based representation of inference
-=======
 import Std.Data.HashMap
 import Std.Data.HashSet
 import Std.Data.TreeMap
@@ -193,6 +188,7 @@ structure State where
   cons : List (Head (Std.HashSet StateId))
   flow : Std.HashSet StateId
 deriving Repr, Inhabited
+
 abbrev Automata := Array State
 
 structure DState where
@@ -210,7 +206,7 @@ inductive Ty where
     | add  (a b : Ty)            -- ⊔ at +, ⊓ at −
     | fix  (v : Symbol) (t : Ty) -- μv.t
     | cons (h : Head Ty)
-    deriving Repr, Inhabited
+    deriving Inhabited
 
 
 inductive Node (ι : Type) where
@@ -228,11 +224,70 @@ inductive Variance
   | VPos | VNeg | VNegPos | None
   deriving BEq, Repr
 
+abbrev Decls := Std.HashMap ℕ (Symbol × Array Variance)
+
+def default_tyenv : Decls := Std.HashMap.ofList [(1, ("bool", {})), (2, ("int", {}))]
+
 structure TyCtx where
   next : Nat := 1
-  decls : Std.HashMap ℕ (Symbol × Array Variance)
-    := Std.HashMap.ofList [(1, ("bool", {})), (2, ("int", {}))]
+  decls : Decls := default_tyenv
   byName : Std.HashMap Symbol ℕ := {}
+
+private def parenIf (b : Bool) (f : Format) : Format := if b then f.paren else f
+
+private def baseName (decls : Decls) (k : ℕ) : Format :=
+  match decls[k]? with
+  | some (name, _) => name
+  | none => s!"#{k}"  -- undeclared stamp
+
+-- precedences: μ 0 < → 25 < ⊔/⊓ 30 < ground-type application max_prec; ⊔, ⊓, → are right-assoc
+mutual
+def Ty.fmt (decls : Decls) : Polarity → Ty → ℕ → Format
+  | _, .var v,   _    => v
+  | p, .zero,    _    => if p = .pos then "⊥" else "⊤"
+  | p, .add a b, prec => parenIf (prec > 30) <| .group <|
+      a.fmt decls p 31 ++ (if p = .pos then " ⊔" else " ⊓") ++ .line ++ b.fmt decls p 30
+  | p, .fix v t, prec => parenIf (prec > 0) <| .group <|
+      s!"μ{v}." ++ .nest 2 (.line ++ t.fmt decls p 0)
+  | p, .cons h,  prec => Head.fmt decls p h prec
+
+def Head.fmt (decls : Decls) : Polarity → Head Ty → ℕ → Format
+  | p, .func d c,    prec => parenIf (prec > 25) <| .group <|
+      d.fmt decls p.flip 26 ++ " →" ++ .line ++ c.fmt decls p 25
+  | p, .rcd fs,      _    => .bracket "{" (.joinSep (fieldsFmt decls p fs) ("," ++ .line)) "}"
+  | p, .variant fs,  _    => .bracket "[" (.joinSep (fieldsFmt decls p fs) (" |" ++ .line)) "]"
+  | _, .base k [],   _    => baseName decls k
+  | p, .base k args, prec => parenIf (prec ≥ max_prec) <| .group <|
+      .joinSep (baseName decls k :: argsFmt decls p args) .line
+
+def fieldsFmt (decls : Decls) (p : Polarity) : List (Symbol × Ty) → List Format
+  | [] => []
+  | (l, t) :: fs => (l ++ " : " ++ t.fmt decls p 0) :: fieldsFmt decls p fs
+
+def argsFmt (decls : Decls) (p : Polarity) : List (TyArg Ty) → List Format
+  | [] => []
+  | a :: as => TyArg.fmt decls p a :: argsFmt decls p as
+
+-- the constructor already records the parameter's variance; `.neg` parts flip the polarity
+def TyArg.fmt (decls : Decls) (p : Polarity) : TyArg Ty → Format
+  | .pos a      => a.fmt decls p max_prec
+  | .neg a      => a.fmt decls p.flip max_prec
+  | .negPos n q => .paren ("in " ++ n.fmt decls p.flip 0 ++ " out " ++ q.fmt decls p 0)
+  | .none       => "_"
+end
+
+/-- A type packaged with what is needed to print it: the polarity it occurs at and the
+ground-type declarations its `base` stamps refer to. -/
+structure PolTy where
+  decls : Decls
+  pol   : Polarity
+  ty    : Ty
+
+instance : Repr PolTy where
+  reprPrec t prec := t.ty.fmt t.decls t.pol prec
+
+instance : Repr Ty where
+  reprPrec t prec := repr (PolTy.mk default_tyenv .pos t)
 
 structure Typechecker.Context where
   env : TyCtx := {}
@@ -282,24 +337,7 @@ def flow_vars (preds : Std.HashMap StateId (List StateId)) (q : StateId) (s : St
     | .neg => if s.flow.isEmpty then [] else [.var s!"v{q}"]
     | .pos => (preds.getD q []).map (fun n ↦ .var s!"v{n}")
 
-/-
-def decode' (aut : Automata) : ℕ → List StateId → StateId → StateM (Std.HashSet StateId) Ty
-  | 0, _, q => pure (.var s!"r{q}")
-  | n + 1, stack, q => do{
-    if stack.contains q then
-      modify (·.insert q); return (.var s!"r{q}")
-    let some s := aut[q]? | return .zero
-    let decSet (ss : Std.HashSet StateId) : StateM _ Ty :=
-        Ty.sum <$> ss.toList.mapM (decode' aut n (q :: stack))
-      let heads ← s.cons.mapM (fun h => Ty.cons <$> h.mapM decSet)
-      let body := Ty.sum (heads ++ flow_vars aut q s)
-      let isRec := (← get).contains q;
-      modify (·.erase q)
-      return if isRec then .fix s!"r{q}" body else body
-  }
-def decode (A : Automata) (root : StateId) : Ty :=
-    (decode' A (A.size + 1) [] root).run' {}
--/
+
 def decode' (aut : Automata) (preds : Std.HashMap StateId (List StateId)) :
     ℕ → List StateId → StateId → StateM (Std.HashSet StateId) Ty
   | 0, _, q => pure (.var s!"r{q}")
@@ -498,6 +536,7 @@ where
     | h' :: hs => match h', h with
       | .func d c, .func d' c' => .func (d.insertMany d') (c.insertMany c') :: hs
       | .rcd fs, .rcd fs' => .rcd (mergeRcd p fs fs') :: hs
+      | .variant fs, .variant fs' => .variant (mergeRcd p.flip fs fs') :: hs
       | .base k as, .base k' as' =>
         if k = k' then .base k (List.zipWith TyArg.union as as') :: hs else h' :: add h hs
       | _, _ => h' :: add h hs
@@ -620,6 +659,12 @@ def simplify (t : Ty) (p : Polarity := .pos) : Except String Ty := do{
 }
 
 abbrev Typing := Std.HashMap String Ty × Ty
+
+instance : Repr Typing where
+  reprPrec (ty : Typing) (n : ℕ):=
+    let decls : Decls := Std.HashMap.ofList [(1, ("bool", {})), (2, ("int", {}))];
+    let env' := ty.fst.toList.map (fun (x, t) ↦ s!"{x} : {repr (PolTy.mk decls .neg t)}");
+    s!"({env'}, {repr (PolTy.mk decls .pos ty.snd)})"
 -- scheme automata
 structure SAutomata where
   scheme : Automata
@@ -653,32 +698,364 @@ def simplify_typing (typ : Typing) := do{
                        res := dstates.head!});
 }
 
--- add head constructors/transitions/flow edges from q2 to q1
--- since flow edges are symmetric, not directed, it suffices to copy flow edges of q2 to q1
-def SAutomata.merge (aut : SAutomata) (q₁ q₂ : StateId)
-                    {h₁ : q₁ < aut.scheme.size} {h₂ : q₂ < aut.scheme.size}
-                    : Except String SAutomata :=
-                        match s₁.pol, s₂.pol with
-                          |.pos, .pos =>
-                            let s₁' : State := {s₁ with cons := mergeHeads .pos (s₁.cons ++ s₂.cons) , flow := s₁.flow ∪ s₂.flow};
-                            pure {aut with scheme := aut.scheme.insertIdxIfInBounds q₁ s₁'}
-                          | .neg, .neg =>
-                            let s₂' : State := {s₂ with cons := mergeHeads .neg (s₁.cons ++ s₂.cons), flow := s₁.flow ∪ s₂.flow};
-                            pure {aut with scheme := aut.scheme.insertIdxIfInBounds q₂ s₂'}
-                          | _, _ => throw s!"cannot merge types with wrong polarity"
-                    where
-                      s₁ := aut.scheme[q₁]'h₁;
-                      s₂ := aut.scheme[q₂]'h₂;
+-- determinise and minimise from the roots: `simplify_typing` without the round trip through `Ty`
+def SAutomata.simplify (a : SAutomata) : SAutomata :=
+  let env := a.env.toList;
+  let (D, rs) := determinise a.scheme (a.res :: env.map (·.2));
+  let (D, rs) := minimise D rs;
+  {scheme := D.toAutomata, env := .ofList (env.map (·.1) |>.zip rs.tail), res := rs.head!}
+
+-- `merge` and `biunify` only rewrite states in place, so they run on a `Vector` whose length is
+-- part of its type: an index checked against `n` once stays in bounds after every update.
+def merge (A : Vector State n) (q₁ q₂ : Fin n) : M (Vector State n) :=
+  let s₁ := A[q₁];
+  let s₂ := A[q₂];
+  match s₁.pol, s₂.pol with
+  | .pos, .pos =>
+    -- flow edges are stored at negative states, so enumerate them and redirect q⁻ ⇝ q₂ to q₁ too
+    let A := A.map fun s ↦
+      if q₂.val ∈ s.flow then {s with flow := s.flow.insert q₁} else s;
+    pure (A.set q₁ {A[q₁] with cons := mergeHeads .pos (A[q₁].cons ++ s₂.cons)})
+  | .neg, .neg =>
+    pure (A.set q₁ {s₁ with flow := s₁.flow ∪ s₂.flow, cons := mergeHeads .neg (s₁.cons ++ s₂.cons)})
+  | _, _ => throw s!"cannot merge types with wrong polarity"
+
+-- ids stored in `flow` and `cons` are plain naturals, so check them against `n` where they're read
+def checkId (n : ℕ) (q : StateId) : M (Fin n) :=
+  if h : q < n then pure ⟨q, h⟩ else throw s!"dangling state id {q}"
+
+-- the negative states with a flow edge into `q`
+def inits_of_flow (A : Vector State n) (q : Fin n) : Array (Fin n) :=
+  match A[q].pol with
+  | .neg => #[]
+  | .pos => (Array.finRange n).filter fun i ↦ q.val ∈ A[i].flow
+
+def filter_upto {n : ℕ} (bag : Std.HashSet StateId) : Std.HashSet (Fin n) :=
+  bag.fold (fun acc q ↦ if h : q < n then acc.insert ⟨q, h⟩ else acc) ∅
+
+def dom_of_arrow {n : ℕ} (A : Vector State n) (q : Fin n) : Std.HashSet (Fin n) :=
+  A[q].cons.foldr (fun h acc ↦ match h with | .func τ₁ _ => filter_upto τ₁ ∪ acc | _ => acc) {}
+
+def rng_of_arrow {n : ℕ} (A : Vector State n) (q : Fin n) : Std.HashSet (Fin n) :=
+  A[q].cons.foldr (fun h acc ↦ match h with | .func _ τ₂ => filter_upto τ₂ ∪ acc | _ => acc) {}
+
+def dom_of_ctor {n : ℕ} (A : Vector State n) (q : Fin n) (p : Polarity) : Std.HashSet (Fin n) :=
+  A[q].cons.foldr
+    (fun h acc ↦
+        match h with
+            | .rcd fs | .variant fs =>  fs.foldr (fun (_, bag) acc ↦ filter_upto bag ∪ acc) acc
+            | .base _ args => args.foldr (fun arg acc ↦
+                                match p with
+                                  | .pos => match arg with
+                                                      | .pos p | .negPos _ p => filter_upto p ∪ acc
+                                                      | _ => acc
+                                  | .neg => match arg with
+                                                      | .neg n | .negPos n _ => filter_upto n ∪ acc
+                                                      | _ => acc) acc
+            | _ => acc) {}
+
+def dom_of_base {n : ℕ} (A : Vector State n) (q : Fin n) (p : Polarity) : Std.HashSet (Fin n) :=
+  A[q].cons.foldr
+  (fun h acc ↦
+    match h with
+    | .base _ args => args.foldr
+          (fun arg acc ↦ match p with
+                                          | .pos => match arg with
+                                                            | .pos p | .negPos _ p => filter_upto p ∪ acc
+                                                            | _ => acc
+                                          | .neg => match arg with
+                                                            | .neg n | .negPos n _ => filter_upto n ∪ acc
+                                                            | _ => acc) acc
+    | _ => acc) {}
+
+def unseen (n : ℕ) (seen : Std.HashSet (StateId × StateId)) : ℕ :=
+  (Finset.univ.filter (fun p : Fin n × Fin n ↦ (p.1.val, p.2.val) ∉ seen)).card
+
+theorem unseen_insert_lt {seen : Std.HashSet (StateId × StateId)} {q₁ q₂ : Fin n}
+    (h : (q₁.val, q₂.val) ∉ seen) : unseen n (seen.insert (q₁.val, q₂.val)) < unseen n seen := by
+  unfold unseen
+  apply Finset.card_lt_card
+  refine Finset.ssubset_iff_of_subset (fun p ↦ ?_) |>.2 ⟨(q₁, q₂), by simp [h], by simp⟩
+  simp only [Finset.mem_filter, Finset.mem_univ, true_and, Std.HashSet.mem_insert, not_or]
+  exact And.right
+
+-- whether a positive head can lie below a negative one, judging by constructors and labels only;
+-- the successors are biunified separately
+def Head.fits : Head α → Head α → Bool
+  | .func .., .func .. => true
+  | .rcd fs₁, .rcd fs₂ => fs₂.all fun (l, _) ↦ (fs₁.lookup l).isSome
+  | .variant cs₁, .variant cs₂ => cs₁.all fun (l, _) ↦ (cs₂.lookup l).isSome
+  | .base k₁ as₁, .base k₂ as₂ => k₁ == k₂ && as₁.length == as₂.length
+  | _, _ => false
+
+-- the successor pairs (p⁺, n⁻) that q⁺ ≤ q⁻ hands on, matched slot by slot: a domain or a `neg`
+-- argument swaps sides, record fields are those of the negative head, variant cases those of the
+-- positive head
+def succPairs (A : Vector State n) (q₁ q₂ : Fin n) : List (Fin n × Fin n) :=
+  A[q₁].cons.flatMap fun h₁ ↦ A[q₂].cons.flatMap (pairs h₁)
+where
+  cross (ps ns : Std.HashSet StateId) : List (Fin n × Fin n) :=
+    (filter_upto ps).toList.flatMap fun p ↦ (filter_upto ns).toList.map (p, ·)
+  pairs : Head (Std.HashSet StateId) → Head (Std.HashSet StateId) → List (Fin n × Fin n)
+    | .func d₁ c₁, .func d₂ c₂ => cross d₂ d₁ ++ cross c₁ c₂
+    | .rcd fs₁, .rcd fs₂ => fs₂.flatMap fun (l, ns) ↦ ((fs₁.lookup l).map (cross · ns)).getD []
+    | .variant cs₁, .variant cs₂ => cs₁.flatMap fun (l, ps) ↦ ((cs₂.lookup l).map (cross ps ·)).getD []
+    | .base k₁ as₁, .base k₂ as₂ =>
+      if k₁ = k₂ then (as₁.zip as₂).flatMap fun
+        | (.pos p, .pos n') => cross p n'
+        | (.neg n', .neg p) => cross p n'
+        | (.negPos n₁ p₁, .negPos n₂ p₂) => cross n₂ n₁ ++ cross p₁ p₂
+        | _ => []
+      else []
+    | _, _ => []
+
+-- biunify, where q₁ positive, q₂ negative. The memo table `seen` is passed explicitly so it can
+-- be the termination measure; the result says it only grew, since each recursive call after the
+-- first in a fold starts from the table the previous one returned.
+def biunify (A : Vector State n) (seen : Std.HashSet (StateId × StateId)) (ldecls : Std.HashMap ℕ (Symbol × Array Variance)) (q₁ q₂ : Fin n) :
+    M {r : Vector State n × Std.HashSet (StateId × StateId) // unseen n r.2 ≤ unseen n seen} := do{
+  let s₁ := A[q₁];
+  let s₂ := A[q₂];
+  if h : (q₁.val, q₂.val) ∈ seen then pure ⟨(A, seen), le_rfl⟩ else do{
+    let seen₁ := seen.insert (q₁.val, q₂.val);
+    have h₁ : unseen n seen₁ < unseen n seen := unseen_insert_lt h;
+    if s₁.cons.any (fun x ↦ s₂.cons.any (fun y ↦ !x.fits y))
+      then throw s!"Cannot biunify type {repr (PolTy.mk ldecls .pos (decode A.toArray q₁))} against {repr (PolTy.mk ldecls .neg (decode A.toArray q₂))}"
+      else do{
+        -- for q'⁺ where q⁻ ⇝ q'⁺ do merge (q'⁺, q⁺)
+        let A ← s₂.flow.foldM (fun A q ↦ do merge A (← checkId n q) q₁) A;
+        -- for q'⁻ where q'⁻ ⇝ q⁺ do merge (q'⁻, q⁻)
+        let A ← (inits_of_flow A q₁).foldlM (fun A q ↦ merge A q q₂) A;
+        -- biunify (q'⁺, q'⁻) for each pair of successors in matching slots. The accumulator bounds
+        -- `unseen` by its value at `seen₁`, which with `h₁` shows each recursive call decreases
+        let r ← (succPairs A q₁ q₂).foldlM (fun ⟨(A, s), hs⟩ (pq, nq) ↦ do{
+            let ⟨r, hr⟩ ← biunify A s ldecls pq nq;
+            pure ⟨r, hr.trans hs⟩
+          }) (⟨(A, seen₁), le_rfl⟩ :
+            {r : _ × Std.HashSet (StateId × StateId) // unseen n r.2 ≤ unseen n seen₁});
+        pure ⟨r.1, r.2.trans h₁.le⟩
+      }
+  }
+}
+termination_by unseen n seen
+decreasing_by
+all_goals (dsimp only at *; omega)
+
+def SAutomata.biunify (ldecls : Std.HashMap ℕ (Symbol × Array Variance)) (aut : SAutomata) (q₁ q₂ : StateId)
+    (h₁ : q₁ < aut.scheme.size) (h₂ : q₂ < aut.scheme.size) : M SAutomata := do{
+  let ⟨(A, seen), _⟩ ← Types.biunify aut.scheme.toVector (←get).seen ldecls ⟨q₁, h₁⟩ ⟨q₂, h₂⟩;
+  modify (fun s ↦ {s with seen := seen});
+  pure {aut with scheme := A.toArray}
+}
+
+-- Conversion of typing to reduced form is superfluous, as simplify_typing does the job
+def reduced (A : Vector State n) (q : Fin n) : Prop :=
+  ∀ c ∈ A[q].cons,
+    match c with
+      | .func τ₁ τ₂ => τ₁.size == 1 ∧ τ₂.size == 1
+      | .rcd fs | .variant fs => ∀ t ∈ fs, t.2.size == 1
+      | .base _ _ => True
+
+def reduced_typing (A : Vector State n) : Prop := ∀ i : Fin n, reduced A i
+
+-- the one state of a successor set that `reduced` says is a singleton
+def single (bag : Std.HashSet StateId) (h : (bag.size == 1) = true) : M (Fin n) :=
+  checkId n (bag.toList.head (by
+    rw [← List.length_pos_iff_ne_nil, Std.HashSet.length_toList]; simp_all))
+
+-- domain and range of q's arrow head, if it has one
+def arrow_of (A : Vector State n) (hA : reduced_typing A) (q : Fin n) : M (Option (Fin n × Fin n)) :=
+  A[q].cons.attach.findSomeM? fun
+    | ⟨.func d r, hc⟩ => do pure (some (← single d (hA q _ hc).1, ← single r (hA q _ hc).2))
+    | _ => pure none
+
+
+def rcd_of {n : ℕ} (A : Vector State n) (hA : reduced_typing A) (q : Fin n) : M (Option (List (Symbol × Fin n))) :=
+  A[q].cons.attach.findSomeM? fun
+    | ⟨.rcd fs, hc⟩ =>
+      do pure (some (← fs.attach.foldlM (fun acc (⟨t, ht⟩ : {t // t ∈ fs}) ↦ do{
+        let k ← single (t.2) ((hA q _ hc) t ht);
+        pure ((t.1, k) :: acc)
+      }) []))
+    | _ => pure none
+
+def variant_of {n : ℕ} (A : Vector State n) (hA : reduced_typing A) (q : Fin n) : M (Option (List (Symbol × Fin n))) :=
+  A[q].cons.attach.findSomeM? fun
+    | ⟨.variant fs, hc⟩ => do pure (some (← fs.attach.foldlM (fun acc (⟨t, ht⟩ : {t // t ∈ fs} )↦ do{
+      let k ← single (t.2) ((hA q _ hc) t ht);
+      pure ((t.1, k) :: acc)
+    }) []))
+    | _ => pure none
+
+-- It remains to decide equivalence of types modulo flow edges.
+-- `A` is never changed, so `reduced_typing A` holds at every recursive call. A pair of states is
+-- either both positive or both negative, so one memo table `seen` serves both functions and is
+-- the termination measure, as in `biunify`.
+mutual
+-- q₁ ≤ q₂ for positive states: each head of q₁ needs a counterpart in q₂
+def subsume_ptype (A : Vector State n) (hA : reduced_typing A) (seen : Std.HashSet (StateId × StateId)) (q₁ q₂ : Fin n)
+  : M {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen} := do{
+  let s₁ := A[q₁];
+  let s₂ := A[q₂];
+  if h : (q₁.val, q₂.val) ∈ seen then pure ⟨seen, le_rfl⟩ else do{
+    let seen₁ := seen.insert (q₁.val, q₂.val);
+    have h₁ : unseen n seen₁ < unseen n seen := unseen_insert_lt h;
+    -- membership check
+    (s₁.cons.filter (fun p : Head (Std.HashSet StateId) ↦ match p with | .base _ _ => True | _ => False)).forM
+        (fun h ↦ do{if not (s₂.cons.contains h) then throw s!"fail"});
+    -- if ⟨→⟩ ∈ H(q₁) then
+    --    if ⟨→⟩ ∉ H(q₂) then fail
+    -- subsume_ntype (d(q₂), d(q₁))
+    -- subsume_ptype (r(q₁), r(q₂))
+    let r ← show M {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen₁} from do{
+      match ← arrow_of A hA q₁, ← arrow_of A hA q₂ with
+        | none, _ => pure ⟨seen₁, le_rfl⟩
+        | some _, none => throw s!"fail"
+        | some (dq₁, rq₁), some (dq₂, rq₂) => do{
+            let ⟨s, hs⟩ ← subsume_ntype A hA seen₁ dq₂ dq₁;
+            let ⟨s, hs'⟩ ← subsume_ptype A hA s rq₁ rq₂;
+            pure ⟨s, hs'.trans hs⟩
+          }
+    };
+    -- if {L₁} ∈ H(q₁) then
+    --   if no {L₂} ∈ H(q₂) with L₂ ⊆ L₁ then fail
+    --   subsume_ptype (l(q₁), l(q₂)) for l ∈ L₂
+    let r ← show M {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen₁} from do{
+      match ← rcd_of A hA q₁, ← rcd_of A hA q₂ with
+        | none, _ => pure r
+        | some _, none => throw s!"fail"
+        | some fs₁, some fs₂ =>
+          fs₂.foldlM (fun ⟨s, hs⟩ (l, k₂) ↦ do{
+            let some k₁ := fs₁.lookup l | throw s!"fail: field {l} missing"
+            let ⟨s, hs'⟩ ← subsume_ptype A hA s k₁ k₂;
+            pure ⟨s, hs'.trans hs⟩
+          }) r
+    };
+    -- if [L₁] ∈ H(q₁) then
+    --   if no [L₂] ∈ H(q₂) with L₁ ⊆ L₂ then fail
+    --   subsume_ptype (l(q₁), l(q₂)) for l ∈ L₁
+    let r ← show M {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen₁} from do{
+      match ← variant_of A hA q₁, ← variant_of A hA q₂ with
+        | none, _ => pure r
+        | some _, none => throw s!"fail"
+        | some cs₁, some cs₂ =>
+          cs₁.foldlM (fun ⟨s, hs⟩ (l, k₁) ↦ do{
+            let some k₂ := cs₂.lookup l | throw s!"fail: case {l} missing"
+            let ⟨s, hs'⟩ ← subsume_ptype A hA s k₁ k₂;
+            pure ⟨s, hs'.trans hs⟩
+          }) r
+    };
+    pure ⟨r.1, r.2.trans h₁.le⟩
+  }}
+termination_by unseen n seen
+decreasing_by all_goals omega
+
+-- q₁ ≤ q₂ for negative states: each head of q₂ needs a counterpart in q₁
+def subsume_ntype (A : Vector State n) (hA : reduced_typing A) (seen : Std.HashSet (StateId × StateId)) (q₁ q₂ : Fin n)
+  : M {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen} := do{
+    let s₁ := A[q₁];
+    let s₂ := A[q₂];
+    if h : (q₁.val, q₂.val) ∈ seen then pure ⟨seen, le_rfl⟩ else do{
+      let seen₁ := seen.insert (q₁.val, q₂.val);
+      have h₁ : unseen n seen₁ < unseen n seen := unseen_insert_lt h;
+      (s₂.cons.filter (fun p : Head (Std.HashSet StateId) ↦ match p with | .base _ _ => True | _ => False)).forM
+        (fun h ↦ do{if not (s₁.cons.contains h) then throw s!"fail"});
+      let r ← show M {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen₁} from do{
+        match ← arrow_of A hA q₁, ← arrow_of A hA q₂ with
+          | _, none => pure ⟨seen₁, le_rfl⟩
+          | none, some _ => throw s!"fail"
+          | some (dq₁, rq₁), some (dq₂, rq₂) => do{
+              let ⟨s, hs⟩ ← subsume_ptype A hA seen₁ dq₂ dq₁;
+              let ⟨s, hs'⟩ ← subsume_ntype A hA s rq₁ rq₂;
+              pure ⟨s, hs'.trans hs⟩
+            }
+      };
+      -- if {L₂} ∈ H(q₂) then
+      --   if no {L₁} ∈ H(q₁) with L₂ ⊆ L₁ then fail
+      --   subsume_ntype (l(q₁), l(q₂)) for l ∈ L₂
+      let r ← show M {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen₁} from do{
+        match ← rcd_of A hA q₁, ← rcd_of A hA q₂ with
+          | _, none => pure r
+          | none, some _ => throw s!"fail"
+          | some fs₁, some fs₂ =>
+            fs₂.foldlM (fun ⟨s, hs⟩ (l, k₂) ↦ do{
+              let some k₁ := fs₁.lookup l | throw s!"fail: field {l} missing"
+              let ⟨s, hs'⟩ ← subsume_ntype A hA s k₁ k₂;
+              pure ⟨s, hs'.trans hs⟩
+            }) r
+      };
+      -- if [L₂] ∈ H(q₂) then
+      --   if no [L₁] ∈ H(q₁) with L₁ ⊆ L₂ then fail
+      --   subsume_ntype (l(q₁), l(q₂)) for l ∈ L₁
+      let r ← show M {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen₁} from do{
+        match ← variant_of A hA q₁, ← variant_of A hA q₂ with
+          | _, none => pure r
+          | none, some _ => throw s!"fail"
+          | some cs₁, some cs₂ =>
+            cs₁.foldlM (fun ⟨s, hs⟩ (l, k₁) ↦ do{
+              let some k₂ := cs₂.lookup l | throw s!"fail: case {l} missing"
+              let ⟨s, hs'⟩ ← subsume_ntype A hA s k₁ k₂;
+              pure ⟨s, hs'.trans hs⟩
+            }) r
+      };
+      pure ⟨r.1, r.2.trans h₁.le⟩
+    }
+  }
+termination_by unseen n seen
+decreasing_by all_goals omega
+end
+
+-- determination of admissability, where q₁ negative, q₂ positive
+def admissable {n : ℕ} (A : Vector State n) (q₁ q₂ : Fin n) : M Bool := do{
+  let s₁ := A[q₁];
+  let s₂ := A[q₂];
+  if s₁.flow.contains q₂ then pure True
+  else do{
+    let A := A.set q₁ {s₁ with flow := s₁.flow.insert q₂};
+    sorry
+  }
+}
+
+-- [TODO] : prove that minimised typings are reduced
+def check (τ₁ τ₂ : Ty) : Except String String := do{
+  let (aut, root) ← encode (.cons (.rcd [("x", τ₁), ("y", τ₂)]));
+  let (d, rs) := determinise aut [root];
+  let (m, rs) := minimise d rs;
+  let A := m.toAutomata;
+  match A[rs.head!]!.cons with
+    | [.rcd fs] => do{
+      let (a, b) := ((fs.lookup "x").get!.toList.head!, (fs.lookup "y").get!.toList.head!);
+      if h : a < A.size ∧ b < A.size then
+        let aut' := A.toVector;
+        let r := (subsume_ptype aut' sorry {} ⟨a, h.1⟩ ⟨b, h.2⟩).run;
+        pure (match r with | .ok _ => s!"{a} ≤ {b}" | .error _ => s!"¬ ({a} ≤ {b})")
+      else throw "impossible"
+    }
+    | _ => throw "impossible"
+}
+
+def int : Ty := .cons (.base 2 [])
+def bool : Ty := .cons (.base 1 [])
+def arr (d r : Ty) : Ty := .cons (.func d r)
 
 #eval detRoundTrip (.add (.cons (.rcd [("x", .add (.var "a3") (.var "a1")), ("y", .var "a2")])) (.cons (.func (.var "a1") (.var "a2"))))
 
 #eval simplify (.cons (.func (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "a") (.var "b")))))
 #eval show_automata (.cons (.base 1 []))
+#eval encode (.cons (.rcd [("x", .cons (.func (.var "x") (.var "y")))]))
 #eval encode_typing (Std.HashMap.ofList [("x", .add (.var "a") (.cons (.func (.var "b") (.var "c"))))], (.add (.var "a") (.cons (.func (.var "b") (.var "c")))))
 #eval encode_typing (Std.HashMap.ofList [("x", (.cons (.func (.var "b") (.var "c"))))], (.cons (.func (.var "b") (.var "c"))))
 #eval detRoundTrip (.cons (.func (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "a") (.var "b")))))
 #eval simplify_typing ({}, (.cons (.func (.var "b") (.cons (.func (.var "c") (.add (.var "b") (.var "c")))))))
 #eval simplify_typing ({}, (.cons (.func (.var "a") (.cons (.func (.var "a") (.var "a"))))))
 #eval simplify_typing ({}, (.cons (.func (.add (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "b") (.var "c")))) (.cons (.func (.var "a") (.var "c"))))))
+-- Typing being reduced, yet incorrect. {x : a} ⊔ {x : b, y : b} ⊔ μc. a → c ≃ {x : a ⊔ y : b} ⊔ a → (μc. a → c)
+#eval simplify ((.add (.cons (.rcd [("x", .var "a")]))  (.add (.cons (.rcd [("x", .var "b"), ("l2", .var "d")])) (.fix "c" (.cons (.func (.var "a") (.var "c")))))))
+#eval simplify (p := .neg) (.add (.cons (.rcd [("x", .var "a")])) (.cons (.rcd [("y", .var "b")])))
+#eval encode (.cons (.func (.cons (.rcd [("x", .var "a"), ("y", .var "a")])) (.cons (.rcd [("x", .add (.var "a") (.cons (.base 0 [])))]))))
+
+#eval simplify (.cons (.variant [("x", arr int .zero), ("y", arr int bool)]))
+-- #eval! check (arr int .zero) (arr int .zero)
+
+
 end Types
->>>>>>> 2a25d7c (- Add scratch of automata encoding of types)
