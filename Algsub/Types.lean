@@ -858,6 +858,14 @@ def reduced (A : Vector State n) (q : Fin n) : Prop :=
 
 def reduced_typing (A : Vector State n) : Prop := ∀ i : Fin n, reduced A i
 
+instance (A : Vector State n) (q : Fin n) : Decidable (reduced A q) := by
+  unfold reduced
+  refine @List.decidableBAll _ _ (fun c ↦ ?_) _
+  split <;> infer_instance
+
+instance (A : Vector State n) : Decidable (reduced_typing A) :=
+  inferInstanceAs (Decidable (∀ i : Fin n, reduced A i))
+
 -- the one state of a successor set that `reduced` says is a singleton
 def single (bag : Std.HashSet StateId) (h : (bag.size == 1) = true) : M (Fin n) :=
   checkId n (bag.toList.head (by
@@ -1005,16 +1013,29 @@ termination_by unseen n seen
 decreasing_by all_goals omega
 end
 
--- determination of admissability, where q₁ negative, q₂ positive
-def admissable {n : ℕ} (A : Vector State n) (q₁ q₂ : Fin n) : M Bool := do{
-  let s₁ := A[q₁];
-  let s₂ := A[q₂];
-  if s₁.flow.contains q₂ then pure True
-  else do{
-    let A := A.set q₁ {s₁ with flow := s₁.flow.insert q₂};
-    sorry
+-- whether the flow edge q₁ ⇝ q₂ is admissible, where q₁ negative, q₂ positive: τ(q₁) ≤ τ(q₂)
+-- already holds with type variables read as rigid. So it does iff they share a variable (q₁ ⇝ q₂
+-- is present) or some head of q₁ fits under one of q₂ with each successor pair admissible in turn.
+-- Heads compare the same way whatever their polarity, so `succPairs.pairs` gives those pairs, one
+-- each when successor sets are singletons. Coinductive: `seen` holds the pairs assumed so far, and
+-- a failed attempt returns `none`, dropping whatever it assumed.
+def admissible (A : Vector State n) (seen : Std.HashSet (StateId × StateId)) (q₁ q₂ : Fin n) :
+    Option {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen} :=
+  if q₂.val ∈ A[q₁].flow then some ⟨seen, le_rfl⟩ else
+  if h : (q₁.val, q₂.val) ∈ seen then some ⟨seen, le_rfl⟩ else
+  let seen₁ := seen.insert (q₁.val, q₂.val);
+  have h₁ : unseen n (seen.insert (q₁.val, q₂.val)) < unseen n seen := unseen_insert_lt h;
+  let candidates := A[q₁].cons.flatMap fun c₁ ↦ A[q₂].cons.filterMap fun c₂ ↦
+    if c₁.fits c₂ then some (succPairs.pairs c₁ c₂) else none;
+  candidates.findSome? fun ps ↦ do{
+    let ⟨s, hs⟩ ← ps.foldlM (fun ⟨s, hs⟩ (p, q) ↦ do{
+        let ⟨s, hs'⟩ ← admissible A s p q;
+        pure ⟨s, hs'.trans hs⟩
+      }) (⟨seen₁, le_rfl⟩ : {r : Std.HashSet (StateId × StateId) // unseen n r ≤ unseen n seen₁});
+    pure ⟨s, hs.trans h₁.le⟩
   }
-}
+termination_by unseen n seen
+decreasing_by all_goals omega
 
 -- [TODO] : prove that minimised typings are reduced
 def check (τ₁ τ₂ : Ty) : Except String String := do{
@@ -1034,12 +1055,30 @@ def check (τ₁ τ₂ : Ty) : Except String String := do{
     | _ => throw "impossible"
 }
 
+mutual
+def hasRecType : Ty → Bool
+        | .var _ | .zero => False
+        | .fix _ _ => True
+        | .add t1 t2 | .cons (.func t1 t2) => hasRecType t1 || hasRecType t2
+        | .cons (.rcd h) | .cons (.variant h) => hasRecType_flds h
+        | .cons (.base _ args) => hasRecType_params args
+def hasRecType_flds : List (Symbol × Ty) → Bool
+        | [] => False
+        | t :: ts => hasRecType t.2 || hasRecType_flds ts
+def hasRecType_params : List (TyArg Ty) → Bool
+        | [] => False
+        | t :: ts =>
+          match t with
+            | .none => hasRecType_params ts
+            | .neg t | .pos t => hasRecType t || hasRecType_params ts
+            | .negPos t1 t2 => hasRecType t1 || hasRecType t2 || hasRecType_params ts
+    end
 def int : Ty := .cons (.base 2 [])
 def bool : Ty := .cons (.base 1 [])
 def arr (d r : Ty) : Ty := .cons (.func d r)
 
 #eval detRoundTrip (.add (.cons (.rcd [("x", .add (.var "a3") (.var "a1")), ("y", .var "a2")])) (.cons (.func (.var "a1") (.var "a2"))))
-
+#eval encode_typing (Std.HashMap.ofList [("x", .var "b")], .var "a")
 #eval simplify (.cons (.func (.cons (.func (.var "a") (.var "b"))) (.cons (.func (.var "a") (.var "b")))))
 #eval show_automata (.cons (.base 1 []))
 #eval encode (.cons (.rcd [("x", .cons (.func (.var "x") (.var "y")))]))

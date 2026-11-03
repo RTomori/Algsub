@@ -71,6 +71,11 @@ syntax:5 &"fix" ident " => " algsub:5 : algsub
 /-- Entry point: `[alg| e]` is the `Exp` denoted by the surface term `e`. -/
 syntax:max "[alg| " algsub "]" : term
 
+declare_syntax_cat typ (behavior := symbol)
+syntax tyfield := ident " : " typ
+syntax: max "bool" : algsub
+syntax: max "int" : algsub
+
 /-! ## Primitives
 
 Primitives are *identifiers*, resolved during elaboration, so none of them has
@@ -225,8 +230,7 @@ elab_rules : command
 #typecheck fix f => fun g -> fun y -> if false then y else g(f g y)
 
 
-#typecheck fix g => fun x -> g 2 + g false
-#eval [alg|fix f => fun g -> fun y -> if false then y else g (f g y)]
+#eval [alg|fix f => fun x -> f 2 + f false]
 #typecheck fix f => fun g -> fun y -> if false then y else g (f g y)
 #typecheck fun r -> r. l
 #typecheck let id = fun x -> x in fun b -> if b then {x = 42, y = id} else {x = 17, y = false}
@@ -247,5 +251,10 @@ elab_rules : command
 #typecheck let f = fun x -> x in f f
 -- Double -- coupled
 #typecheck let rec double = fun f -> fun y -> f (f y) in let foo = fun v -> double(fun x -> x + 1) v in let goo = fun w -> double not w in {l = foo 3,r = goo true}
-
+#typecheck fix f => fun g -> fun y -> if false then y else g(f g y)
+#typecheck fix f => fun g -> fun h1 -> fun y -> if false then y else g(f g h1 (f h1 g y))
+#typecheck fix f => fun g -> fun h1 -> fun h2 -> fun y -> if false then y else g(f g h1 h2(f h1 g h2(f h1 h2 g y)))
+#typecheck fix f => fun x -> ((fun y -> true)(not (f false)))
+#typecheck fix f => fun x -> f x
+#typecheck fix f => fun x -> {a = f x}
 end Algsub
